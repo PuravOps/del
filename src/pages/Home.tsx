@@ -20,7 +20,7 @@ const Home: React.FC = () => {
           color: "white",
         }}
       >
-        <h1 className="text-center mb-4">Welcome to SaaS SPA</h1>
+        <h1 className="text-center mb-4">Whats your lucky name?</h1>
         <InputButton placeholder="Enter page name (e.g., about)" />
       </div>
     </div>

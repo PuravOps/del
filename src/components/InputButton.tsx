@@ -8,7 +8,7 @@ const InputButton: React.FC<{ placeholder?: string }> = ({ placeholder }) => {
   const handleClick = () => {
     if (!input.trim()) return;
 
-    const allowedRoutes = ["about"]; // add your routes here
+    const allowedRoutes = ["baguli"]; // add your routes here
     if (allowedRoutes.includes(input.toLowerCase())) {
       navigate(`/${input.toLowerCase()}`);
     } else {
@@ -26,6 +26,7 @@ const InputButton: React.FC<{ placeholder?: string }> = ({ placeholder }) => {
           color: "white",
           border: "1px solid #444",
         }}
+        
         placeholder={placeholder || "Enter page name"}
         value={input}
         onChange={(e) => setInput(e.target.value)}
