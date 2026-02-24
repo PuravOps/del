@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { getMessages, getUsers } from "../services/api"
+import { getMessages, getUnseenCounts, getUsers } from "../services/api"
 import { socketService } from "./ChatService"
 import type { MessageResponse, SendMessagePayload } from "../types/chat.types"
 
@@ -13,6 +13,7 @@ const Chat = () => {
   const [users, setUsers] = useState<User[]>([])
   const [selectedUser, setSelectedUser] = useState<User | null>(null)
   const [messages, setMessages] = useState<MessageResponse[]>([])
+  const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({})
   const [input, setInput] = useState("")
   const [sendError, setSendError] = useState<string | null>(null)
   const [showEmojiPicker, setShowEmojiPicker] = useState(false)
@@ -43,6 +44,14 @@ const Chat = () => {
     )
   }, [messages, selectedUser, sender])
 
+  const lastOutgoingMessageId = useMemo(() => {
+    for (let i = filteredMessages.length - 1; i >= 0; i -= 1) {
+      const m = filteredMessages[i]
+      if (m.sender === sender) return m._id
+    }
+    return null
+  }, [filteredMessages, sender])
+
   const emojis = useMemo(
     () => ["😀", "😁", "😂", "🤣", "😊", "😍", "😘", "😎", "🤔", "😢", "😡", "👍", "👎", "🙏", "👏", "🎉", "❤️", "🔥"],
     [],
@@ -56,12 +65,58 @@ const Chat = () => {
   useEffect(() => {
     if (!sender) return
 
-    socketService.onReceiveMessage((msg) => {
+    const handleReceive = (msg: MessageResponse) => {
       setMessages((prev) => [...prev, msg])
-    })
+
+      if (msg.receiver !== sender) return
+
+      const from = msg.sender
+
+      if (!selectedUser || selectedUser.phone !== from) {
+        setUnreadCounts((prev) => ({
+          ...prev,
+          [from]: (prev[from] ?? 0) + 1,
+        }))
+        window.dispatchEvent(new Event("unreadCountsChanged"))
+        return
+      }
+
+      socketService.markSeen({ sender: from, receiver: sender })
+      window.dispatchEvent(new Event("unreadCountsChanged"))
+    }
+
+    socketService.onReceiveMessage(handleReceive)
 
     return () => {
-      socketService.offReceiveMessage()
+      socketService.offReceiveMessage(handleReceive)
+    }
+  }, [sender, selectedUser])
+
+  useEffect(() => {
+    if (!sender) return
+
+    const handler = (payload: {
+      sender: string
+      receiver: string
+      seenAt?: string
+      modifiedCount?: number
+    }) => {
+      if (payload.sender !== sender) return
+
+      const seenAt = payload.seenAt ?? new Date().toISOString()
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.sender === sender && m.receiver === payload.receiver
+            ? { ...m, seen: true, seenAt }
+            : m,
+        ),
+      )
+    }
+
+    socketService.onMessagesSeen(handler)
+
+    return () => {
+      socketService.offMessagesSeen(handler)
     }
   }, [sender])
 
@@ -74,6 +129,24 @@ const Chat = () => {
     }
   }
 
+  const refreshUnseenCounts = useCallback(async () => {
+    if (!sender) return
+    try {
+      const res = await getUnseenCounts(sender)
+      const next: Record<string, number> = {}
+
+      for (const row of res.data ?? []) {
+        if (!row?.sender) continue
+        next[row.sender] = Number(row.count ?? 0)
+      }
+
+      setUnreadCounts(next)
+      window.dispatchEvent(new Event("unreadCountsChanged"))
+    } catch (e) {
+      console.error("Failed to load unseen counts", e)
+    }
+  }, [sender])
+
   useEffect(() => {
     const timer = window.setTimeout(() => {
       void loadUsers()
@@ -83,6 +156,10 @@ const Chat = () => {
       window.clearTimeout(timer)
     }
   }, [])
+
+  useEffect(() => {
+    void refreshUnseenCounts()
+  }, [refreshUnseenCounts])
 
   useEffect(() => {
     if (!selectedUser || !sender) return
@@ -98,6 +175,30 @@ const Chat = () => {
 
     loadThread()
   }, [selectedUser, sender])
+
+  useEffect(() => {
+    if (!selectedUser || !sender) return
+
+    const hasUnseenIncoming = filteredMessages.some(
+      (m) =>
+        m.sender === selectedUser.phone &&
+        m.receiver === sender &&
+        !Boolean(m.seen),
+    )
+    if (!hasUnseenIncoming) return
+
+    const seenAt = new Date().toISOString()
+    socketService.markSeen({ sender: selectedUser.phone, receiver: sender })
+    setUnreadCounts((prev) => ({ ...prev, [selectedUser.phone]: 0 }))
+    window.dispatchEvent(new Event("unreadCountsChanged"))
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.sender === selectedUser.phone && m.receiver === sender
+          ? { ...m, seen: true, seenAt }
+          : m,
+      ),
+    )
+  }, [filteredMessages, selectedUser, sender])
 
   const sendMessage = async () => {
     const trimmed = input.trim()
@@ -134,26 +235,48 @@ const Chat = () => {
           overflowY: "auto",
         }}
       >
-        {chatUsers.map((user) => (
-          <div
-            key={user._id}
-            className={`p-3 border-bottom cursor-pointer ${
-              selectedUser?._id === user._id ? "bg-light" : ""
-            }`}
-            onClick={() => setSelectedUser(user)}
-            style={{ cursor: "pointer" }}
-          >
-            <strong>{user.name}</strong>
-            <div className="text-muted small">{user.phone}</div>
-          </div>
-        ))}
+        {chatUsers.map((user) => {
+          const unread = unreadCounts[user.phone] ?? 0
+          const isSelected = selectedUser?._id === user._id
+          const hasUnseen = unread > 0
+
+          return (
+            <div
+              key={user._id}
+              className={`p-3 border-bottom cursor-pointer ${
+                isSelected
+                  ? "bg-body-secondary"
+                  : hasUnseen
+                    ? "bg-warning-subtle"
+                    : ""
+              }`}
+              onClick={() => {
+                setSelectedUser(user)
+                if (sender) {
+                  setUnreadCounts((prev) => ({ ...prev, [user.phone]: 0 }))
+                  socketService.markSeen({ sender: user.phone, receiver: sender })
+                  window.dispatchEvent(new Event("unreadCountsChanged"))
+                }
+              }}
+              style={{ cursor: "pointer" }}
+            >
+              <div className="d-flex align-items-center justify-content-between">
+                <strong className={hasUnseen ? "fw-semibold" : undefined}>
+                  {user.name}
+                </strong>
+                {hasUnseen && <span className="badge bg-danger">{unread}</span>}
+              </div>
+              <div className="text-muted small">{user.phone}</div>
+            </div>
+          )
+        })}
       </div>
 
       {/* RIGHT SIDE - CHAT AREA */}
       <div className="flex-grow-1 d-flex flex-column">
         
         {/* Header */}
-        <div className="p-3 border-bottom bg-white">
+        <div className="p-3 border-bottom bg-body">
           {selectedUser ? (
             <strong>{selectedUser.name}</strong>
           ) : (
@@ -163,12 +286,12 @@ const Chat = () => {
 
         {/* Messages */}
         <div
-          className="flex-grow-1 p-3"
-          style={{ overflowY: "auto", background: "#f5f5f5" }}
+          className="flex-grow-1 p-3 bg-body-tertiary"
+          style={{ overflowY: "auto" }}
         >
           {filteredMessages.map((m, index) => (
               <div
-                key={index}
+                key={m._id ?? index}
                 className={`mb-2 d-flex ${
                   m.sender === sender
                     ? "justify-content-end"
@@ -179,11 +302,16 @@ const Chat = () => {
                   className={`p-2 rounded ${
                     m.sender === sender
                       ? "bg-success text-white"
-                      : "bg-white"
+                      : "bg-body border"
                   }`}
                   style={{ maxWidth: "60%" }}
                 >
                   {m.message}
+                  {m.sender === sender && m._id === lastOutgoingMessageId && (
+                    <div className="text-end small text-white-50 mt-1">
+                      {m.seen ? "Seen" : "Sent"}
+                    </div>
+                  )}
                 </div>
               </div>
             ))}
@@ -197,13 +325,13 @@ const Chat = () => {
               <div className="alert alert-warning py-2 mb-2">{sendError}</div>
             )}
             {showEmojiPicker && (
-              <div className="border rounded bg-white p-2 mb-2">
+              <div className="border rounded bg-body p-2 mb-2">
                 <div className="d-flex flex-wrap gap-2">
                   {emojis.map((emoji) => (
                     <button
                       key={emoji}
                       type="button"
-                      className="btn btn-light btn-sm"
+                      className="btn btn-outline-secondary btn-sm"
                       onClick={() => {
                         setInput((prev) => `${prev}${emoji}`)
                         inputRef.current?.focus()

@@ -9,6 +9,8 @@ export interface MessageResponse {
   sender: string
   receiver: string
   message: string
+  seen?: boolean
+  seenAt?: string | null
   createdAt: string
   updatedAt: string
 }
