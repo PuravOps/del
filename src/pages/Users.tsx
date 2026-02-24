@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { getUsers, deleteUser } from "../services/api";
 import { User } from "../types/user.types";
 
 const Users = () => {
   const [users, setUsers] = useState<User[]>([]);
+  const navigate = useNavigate();
 
   const loadUsers = async () => {
     const res = await getUsers();
@@ -11,7 +13,13 @@ const Users = () => {
   };
 
   useEffect(() => {
-    loadUsers();
+    const timer = window.setTimeout(() => {
+      void loadUsers();
+    }, 0);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
   }, []);
 
   const handleDelete = async (id: string) => {
@@ -23,7 +31,13 @@ const Users = () => {
     <div className="container mt-4">
       <div className="d-flex justify-content-between align-items-center mb-3">
         <h3>User List</h3>
-        <button className="btn btn-primary">Create New User</button>
+        <button
+          type="button"
+          className="btn btn-primary"
+          onClick={() => navigate("/users/create")}
+        >
+          Create New User
+        </button>
       </div>
 
       <table className="table table-bordered">

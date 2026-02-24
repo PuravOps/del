@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { getMessages, getUsers } from "../services/api"
 import { socketService } from "./ChatService"
 import type { MessageResponse, SendMessagePayload } from "../types/chat.types"
@@ -14,8 +14,24 @@ const Chat = () => {
   const [selectedUser, setSelectedUser] = useState<User | null>(null)
   const [messages, setMessages] = useState<MessageResponse[]>([])
   const [input, setInput] = useState("")
+  const [sendError, setSendError] = useState<string | null>(null)
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false)
+
+  const inputRef = useRef<HTMLInputElement | null>(null)
+  const messagesEndRef = useRef<HTMLDivElement | null>(null)
 
   const sender = localStorage.getItem("userPhone") || ""
+
+  const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
+    window.requestAnimationFrame(() => {
+      messagesEndRef.current?.scrollIntoView({ behavior })
+    })
+  }, [])
+
+  const chatUsers = useMemo(() => {
+    if (!sender) return users
+    return users.filter((u) => u.phone !== sender)
+  }, [users, sender])
 
   const filteredMessages = useMemo(() => {
     if (!selectedUser) return []
@@ -27,51 +43,84 @@ const Chat = () => {
     )
   }, [messages, selectedUser, sender])
 
+  const emojis = useMemo(
+    () => ["😀", "😁", "😂", "🤣", "😊", "😍", "😘", "😎", "🤔", "😢", "😡", "👍", "👎", "🙏", "👏", "🎉", "❤️", "🔥"],
+    [],
+  )
+
+  useEffect(() => {
+    if (!selectedUser) return
+    scrollToBottom("smooth")
+  }, [filteredMessages.length, scrollToBottom, selectedUser?._id])
+
   useEffect(() => {
     if (!sender) return
 
-    socketService.connect(sender)
     socketService.onReceiveMessage((msg) => {
       setMessages((prev) => [...prev, msg])
     })
 
     return () => {
       socketService.offReceiveMessage()
-      socketService.disconnect()
     }
   }, [sender])
 
+  const loadUsers = async () => {
+    try {
+      const res = await getUsers()
+      setUsers(res.data)
+    } catch (e) {
+      console.error("Failed to load users", e)
+    }
+  }
+
   useEffect(() => {
-    loadUsers()
+    const timer = window.setTimeout(() => {
+      void loadUsers()
+    }, 0)
+
+    return () => {
+      window.clearTimeout(timer)
+    }
   }, [])
 
   useEffect(() => {
     if (!selectedUser || !sender) return
 
     const loadThread = async () => {
-      const res = await getMessages(sender, selectedUser.phone)
-      setMessages(res.data)
+      try {
+        const res = await getMessages(sender, selectedUser.phone)
+        setMessages(res.data)
+      } catch (e) {
+        console.error("Failed to load messages", e)
+      }
     }
 
     loadThread()
   }, [selectedUser, sender])
 
-  const loadUsers = async () => {
-    const res = await getUsers()
-    setUsers(res.data)
-  }
-
-  const sendMessage = () => {
-    if (!selectedUser || !input) return
+  const sendMessage = async () => {
+    const trimmed = input.trim()
+    if (!selectedUser || !trimmed || !sender) return
+    setSendError(null)
 
     const payload: SendMessagePayload = {
       sender,
       receiver: selectedUser.phone,
-      message: input,
+      message: trimmed,
     }
 
     socketService.sendMessage(payload)
     setInput("")
+    setShowEmojiPicker(false)
+    scrollToBottom("smooth")
+
+    // try {
+    //   await saveMessage(payload)
+    // } catch (e) {
+    //   console.error("Message sent but not saved to DB", e)
+    //   setSendError("Message sent, but it wasn't saved. Check API/DB logs.")
+    // }
   }
 
   return (
@@ -85,7 +134,7 @@ const Chat = () => {
           overflowY: "auto",
         }}
       >
-        {users.map((user) => (
+        {chatUsers.map((user) => (
           <div
             key={user._id}
             className={`p-3 border-bottom cursor-pointer ${
@@ -138,23 +187,57 @@ const Chat = () => {
                 </div>
               </div>
             ))}
+          <div ref={messagesEndRef} />
         </div>
 
         {/* Input */}
         {selectedUser && (
-          <div className="p-3 border-top d-flex">
-            <input
-              className="form-control me-2"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              placeholder="Type a message..."
-            />
-            <button
-              className="btn btn-success"
-              onClick={sendMessage}
-            >
-              Send
-            </button>
+          <div className="p-3 border-top">
+            {sendError && (
+              <div className="alert alert-warning py-2 mb-2">{sendError}</div>
+            )}
+            {showEmojiPicker && (
+              <div className="border rounded bg-white p-2 mb-2">
+                <div className="d-flex flex-wrap gap-2">
+                  {emojis.map((emoji) => (
+                    <button
+                      key={emoji}
+                      type="button"
+                      className="btn btn-light btn-sm"
+                      onClick={() => {
+                        setInput((prev) => `${prev}${emoji}`)
+                        inputRef.current?.focus()
+                      }}
+                      aria-label={`Insert ${emoji}`}
+                    >
+                      {emoji}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="d-flex align-items-center">
+              <button
+                type="button"
+                className="btn btn-outline-secondary me-2"
+                onClick={() => setShowEmojiPicker((v) => !v)}
+                aria-label="Toggle emoji picker"
+                title="Emojis"
+              >
+                😊
+              </button>
+              <input
+                ref={inputRef}
+                className="form-control me-2"
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                placeholder="Type a message..."
+              />
+              <button className="btn btn-success" onClick={sendMessage}>
+                Send
+              </button>
+            </div>
           </div>
         )}
       </div>

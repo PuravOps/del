@@ -12,6 +12,7 @@ const Login = () => {
     const res = await loginUser({ phone, password })
     localStorage.setItem("token", res.data.token)
     localStorage.setItem("userPhone", res.data.user?.phone ?? phone)
+    localStorage.setItem("userName", res.data.user?.name ?? "")
     navigate("/users")
   }
 

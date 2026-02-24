@@ -1,14 +1,28 @@
 import axios from "axios";
+import type { SendMessagePayload } from "../types/chat.types";
 
 const api = axios.create({
-  baseURL: "http://localhost:5000/api",
+  baseURL: import.meta.env.VITE_API_URI,
   headers: {
     "Content-Type": "application/json",
   },
 });
 
+api.interceptors.request.use((config) => {
+  const token = localStorage.getItem("token");
+  if (token) {
+    config.headers = config.headers ?? {};
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
+});
+
 export const getMessages = (user1: string, user2: string) => {
   return api.get(`/chat/${user1}/${user2}`);
+};
+
+export const saveMessage = (payload: SendMessagePayload) => {
+  return api.post("/chat", payload);
 };
 
 export const registerUser = (data: any) => api.post("/users/register", data);

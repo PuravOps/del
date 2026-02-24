@@ -5,7 +5,7 @@ class SocketService {
   private socket: Socket
 
   constructor() {
-    this.socket = io("http://localhost:5000", {
+    this.socket = io(import.meta.env.VITE_SOCKET_URI, {
       autoConnect: false,
     })
   }

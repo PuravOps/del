@@ -1,5 +1,6 @@
-import { ReactNode } from "react";
+import { ReactNode, useEffect } from "react";
 import { Link, useLocation } from "react-router-dom";
+import { socketService } from "../services/socket";
 
 interface Props {
   children: ReactNode;
@@ -7,10 +8,23 @@ interface Props {
 
 const Layout = ({ children }: Props) => {
   const token = localStorage.getItem("token");
+  const userPhone = localStorage.getItem("userPhone") || "";
+  const userName = localStorage.getItem("userName") || "";
 
   const location = useLocation();
 
+  useEffect(() => {
+    if (!token || !userPhone) return;
+
+    socketService.connect(userPhone);
+
+    return () => {
+      socketService.disconnect();
+    };
+  }, [token, userPhone]);
+
   const logout = () => {
+    socketService.disconnect();
     localStorage.clear();
     window.location.href = "/login";
   };
@@ -21,14 +35,16 @@ const Layout = ({ children }: Props) => {
     <div className="d-flex" style={{ height: "100vh" }}>
       {/* Side Drawer */}
       <div className="bg-dark text-white p-3" style={{ width: "240px" }}>
-        <h4 className="mb-4">
-          My App{" "}
-          <button className="btn btn-danger mt-4 w-100" onClick={logout}>
-            Logout
-          </button>
-        </h4>
+        <h4 className="mb-3">My App</h4>
 
-        <ul className="nav flex-column">
+        <button className="btn btn-danger w-100" onClick={logout}>
+          Logout
+        </button>
+        <div className="mt-2 small text-white-50">
+          {userName ? userName : userPhone}
+        </div>
+
+        <ul className="nav flex-column mt-4">
           <li className="nav-item mb-2">
             <Link
               to="/users"

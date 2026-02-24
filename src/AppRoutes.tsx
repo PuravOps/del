@@ -28,6 +28,15 @@ const AppRoutes = () => {
 
       {/* Protected Routes */}
       <Route
+        path="/users/create"
+        element={
+          <PrivateRoute>
+            <Register />
+          </PrivateRoute>
+        }
+      />
+
+      <Route
         path="/users"
         element={
           <PrivateRoute>
@@ -51,4 +60,3 @@ const AppRoutes = () => {
 };
 
 export default AppRoutes;
-
