@@ -25,6 +25,16 @@ export const saveMessage = (payload: SendMessagePayload) => {
   return api.post("/chat", payload);
 };
 
+export const getUnseenCounts = (receiver: string) => {
+  return api.get(`/chat/unseen-counts/${receiver}`);
+};
+
+export const markConversationSeen = (sender: string, receiver: string) => {
+  return api.post("/chat/mark-seen", { sender, receiver });
+};
+
+export const ping = () => api.get("/ping");
+
 export const registerUser = (data: any) => api.post("/users/register", data);
 
 export const loginUser = (data: any) => api.post("/users/login", data);
