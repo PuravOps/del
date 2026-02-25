@@ -4,6 +4,7 @@ import { socketService } from "../services/socket";
 import { getUnseenCounts, ping } from "../services/api";
 import { clearFaviconBadge, setFaviconBadge } from "../utils/favicon";
 import type { MessageResponse } from "../types/chat.types";
+import { usePageActivity } from "../utils/usePageActivity";
 
 interface Props {
   children: ReactNode;
@@ -20,6 +21,24 @@ const Layout = ({ children }: Props) => {
   });
 
   const location = useLocation();
+  const isPageActive = usePageActivity();
+  const [activeChatPhone, setActiveChatPhone] = useState<string | null>(null);
+  const [isActiveChatThread, setIsActiveChatThread] = useState(false);
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as
+        | { phone: string | null; isActive: boolean }
+        | undefined;
+      setActiveChatPhone(detail?.phone ?? null);
+      setIsActiveChatThread(Boolean(detail?.phone) && Boolean(detail?.isActive));
+    };
+
+    window.addEventListener("activeChatThreadChanged", handler);
+    return () => {
+      window.removeEventListener("activeChatThreadChanged", handler);
+    };
+  }, []);
 
   useEffect(() => {
     document.documentElement.setAttribute("data-bs-theme", theme);
@@ -68,7 +87,22 @@ const Layout = ({ children }: Props) => {
 
     const onReceive = (msg: MessageResponse) => {
       if (msg.receiver !== userPhone) return;
-      void refreshUnseenTotal();
+
+      if (
+        isPageActive &&
+        location.pathname === "/chat" &&
+        isActiveChatThread &&
+        activeChatPhone === msg.sender
+      ) {
+        return;
+      }
+
+      // Avoid badge flicker when you're actively viewing the app/thread and the chat page
+      // immediately marks messages seen via socket.
+      const delayMs = isPageActive ? 350 : 0;
+      window.setTimeout(() => {
+        void refreshUnseenTotal();
+      }, delayMs);
     };
 
     socketService.onReceiveMessage(onReceive);
@@ -76,18 +110,29 @@ const Layout = ({ children }: Props) => {
     return () => {
       socketService.offReceiveMessage(onReceive);
     };
-  }, [token, userPhone, refreshUnseenTotal]);
+  }, [
+    token,
+    userPhone,
+    refreshUnseenTotal,
+    isPageActive,
+    location.pathname,
+    isActiveChatThread,
+    activeChatPhone,
+  ]);
 
   useEffect(() => {
     const handler = () => {
-      void refreshUnseenTotal();
+      const delayMs = isPageActive && location.pathname === "/chat" ? 350 : 0;
+      window.setTimeout(() => {
+        void refreshUnseenTotal();
+      }, delayMs);
     };
 
     window.addEventListener("unreadCountsChanged", handler);
     return () => {
       window.removeEventListener("unreadCountsChanged", handler);
     };
-  }, [refreshUnseenTotal]);
+  }, [refreshUnseenTotal, isPageActive, location.pathname]);
 
   useEffect(() => {
     if (unreadTotal > 0) {

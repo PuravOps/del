@@ -17,8 +17,12 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
-export const getMessages = (user1: string, user2: string) => {
-  return api.get(`/chat/${user1}/${user2}`);
+export const getMessages = (
+  user1: string,
+  user2: string,
+  params?: { limit?: number; before?: string },
+) => {
+  return api.get(`/chat/${user1}/${user2}`, { params });
 };
 
 export const saveMessage = (payload: SendMessagePayload) => {
