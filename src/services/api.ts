@@ -29,6 +29,22 @@ export const saveMessage = (payload: SendMessagePayload) => {
   return api.post("/chat", payload);
 };
 
+export const deleteMessage = (messageId: string) => {
+  return api.delete(`/chat/${messageId}`);
+};
+
+export const updateMessage = (messageId: string, message: string) => {
+  return api.put(`/chat/${messageId}`, { message });
+};
+
+export const addReaction = (messageId: string, emoji: string, userPhone: string) => {
+  return api.post(`/chat/${messageId}/reactions`, { emoji, userPhone });
+};
+
+export const removeReaction = (messageId: string, emoji: string, userPhone: string) => {
+  return api.delete(`/chat/${messageId}/reactions`, { data: { emoji, userPhone } });
+};
+
 export const getUnseenCounts = (receiver: string) => {
   return api.get(`/chat/unseen-counts/${receiver}`);
 };

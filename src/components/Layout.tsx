@@ -1,4 +1,4 @@
-import { ReactNode, useCallback, useEffect, useState } from "react";
+﻿import { ReactNode, useCallback, useEffect, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { socketService } from "../services/socket";
 import { getUnseenCounts, ping } from "../services/api";
@@ -19,6 +19,9 @@ const Layout = ({ children }: Props) => {
     const stored = localStorage.getItem("theme");
     return stored === "light" ? "light" : "dark";
   });
+  const [isMobileLayout, setIsMobileLayout] = useState(false);
+  const [isNavOpen, setIsNavOpen] = useState(false);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
 
   const location = useLocation();
   const isPageActive = usePageActivity();
@@ -45,8 +48,30 @@ const Layout = ({ children }: Props) => {
     localStorage.setItem("theme", theme);
   }, [theme]);
 
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 767.98px)");
+    const apply = () => setIsMobileLayout(mq.matches);
+    apply();
+    mq.addEventListener("change", apply);
+    return () => {
+      mq.removeEventListener("change", apply);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isMobileLayout) setIsNavOpen(false);
+  }, [isMobileLayout]);
+
   const toggleTheme = () => {
     setTheme((prev) => (prev === "dark" ? "light" : "dark"));
+  };
+
+  const toggleSidebar = () => {
+    if (isMobileLayout) {
+      setIsNavOpen((v) => !v);
+      return;
+    }
+    setIsSidebarOpen((v) => !v);
   };
 
   const refreshUnseenTotal = useCallback(async () => {
@@ -149,6 +174,48 @@ const Layout = ({ children }: Props) => {
     window.location.href = "/login";
   };
 
+  const sidebarNav = (
+    <>
+      <button className="btn btn-danger w-100 mt-3" onClick={logout}>
+        Logout
+      </button>
+      <div className="mt-2 small text-body-secondary">{userName ? userName : userPhone}</div>
+
+      <ul className="nav flex-column mt-4">
+        <li className="nav-item mb-2">
+          <Link
+            to="/users"
+            onClick={() => setIsNavOpen(false)}
+            className={`nav-link link-body-emphasis ${
+              location.pathname === "/users"
+                ? "active fw-semibold bg-primary-subtle rounded px-2"
+                : ""
+            }`}
+          >
+            Users
+          </Link>
+        </li>
+
+        <li className="nav-item">
+          <Link
+            to="/chat"
+            onClick={() => setIsNavOpen(false)}
+            className={`nav-link link-body-emphasis ${
+              location.pathname === "/chat"
+                ? "active fw-semibold bg-primary-subtle rounded px-2"
+                : ""
+            }`}
+          >
+            Chat{" "}
+            {unreadTotal > 0 && (
+              <span className="badge bg-danger ms-2">{unreadTotal > 99 ? "99+" : unreadTotal}</span>
+            )}
+          </Link>
+        </li>
+      </ul>
+    </>
+  );
+
   return !token ? (
     <div className="min-vh-100 bg-body">
       <div className="d-flex justify-content-end p-3">
@@ -159,74 +226,94 @@ const Layout = ({ children }: Props) => {
           aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
           title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
         >
-          {theme === "dark" ? "☀️" : "🌙"}
+          {theme === "dark" ? "\u2600\uFE0F" : "\u{1F319}"}
         </button>
       </div>
       {children}
     </div>
   ) : (
-    <div className="d-flex bg-body" style={{ height: "100vh" }}>
-      {/* Side Drawer */}
-      <div
-        className="border-end p-3 bg-body-tertiary shadow-sm"
-        style={{ width: "240px" }}
-      >
-        <div className="d-flex align-items-center justify-content-between mb-3">
-          <h4 className="mb-0">My App</h4>
+    <div className="d-flex bg-body position-relative" style={{ height: "100vh" }}>
+      {isMobileLayout && isNavOpen && (
+        <div
+          className="position-fixed top-0 start-0 w-100 h-100"
+          style={{ background: "rgba(0,0,0,0.35)", zIndex: 1200 }}
+          role="presentation"
+          onClick={() => setIsNavOpen(false)}
+        />
+      )}
+
+      {isMobileLayout ? (
+        <div
+          className="position-fixed top-0 start-0 h-100 border-end p-3 bg-body-tertiary shadow-sm"
+          style={{
+            width: "240px",
+            zIndex: 1201,
+            transform: isNavOpen ? "translateX(0)" : "translateX(-105%)",
+            transition: "transform 0.2s ease",
+            overflowY: "auto",
+          }}
+          role="dialog"
+          aria-label="Navigation drawer"
+          aria-hidden={!isNavOpen}
+        >
+          <div className="d-flex align-items-center justify-content-between mb-3">
+            <h4 className="mb-0">Blurr</h4>
+            <div className="d-flex align-items-center gap-2">
+              <button
+                type="button"
+                className="btn btn-outline-secondary btn-sm"
+                onClick={() => setIsNavOpen(false)}
+                aria-label="Close navigation"
+                title="Close"
+              >
+                {"\u2715"}
+              </button>
+              <button
+                type="button"
+                className="btn btn-outline-secondary btn-sm"
+                onClick={toggleTheme}
+                aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+                title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+              >
+                {theme === "dark" ? "\u2600\uFE0F" : "\u{1F319}"}
+              </button>
+            </div>
+          </div>
+          {sidebarNav}
+        </div>
+      ) : isSidebarOpen ? (
+        <div className="border-end p-3 bg-body-tertiary shadow-sm" style={{ width: "240px" }}>
+          <div className="d-flex align-items-center justify-content-between mb-3">
+            <h4 className="mb-0">Blurr</h4>
+            <button
+              type="button"
+              className="btn btn-outline-secondary btn-sm"
+              onClick={toggleTheme}
+              aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+              title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+            >
+              {theme === "dark" ? "\u2600\uFE0F" : "\u{1F319}"}
+            </button>
+          </div>
+          {sidebarNav}
+        </div>
+      ) : null}
+
+      {/* Main Content */}
+      <div className="flex-grow-1 d-flex flex-column" style={{ minWidth: 0 }}>
+        <div className="border-bottom bg-body p-2 d-flex align-items-center">
           <button
             type="button"
             className="btn btn-outline-secondary btn-sm"
-            onClick={toggleTheme}
-            aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
-            title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+            onClick={toggleSidebar}
+            aria-label="Toggle navigation"
+            title="Menu"
           >
-            {theme === "dark" ? "☀️" : "🌙"}
+            {"\u2630"}
           </button>
         </div>
-
-        <button className="btn btn-danger w-100 mt-3" onClick={logout}>
-          Logout
-        </button>
-        <div className="mt-2 small text-body-secondary">
-          {userName ? userName : userPhone}
-        </div>
-
-        <ul className="nav flex-column mt-4">
-          <li className="nav-item mb-2">
-            <Link
-              to="/users"
-              className={`nav-link link-body-emphasis ${
-                location.pathname === "/users"
-                  ? "active fw-semibold bg-primary-subtle rounded px-2"
-                  : ""
-              }`}
-            >
-              Users
-            </Link>
-          </li>
-
-          <li className="nav-item">
-            <Link
-              to="/chat"
-              className={`nav-link link-body-emphasis ${
-                location.pathname === "/chat"
-                  ? "active fw-semibold bg-primary-subtle rounded px-2"
-                  : ""
-              }`}
-            >
-              Chat{" "}
-              {unreadTotal > 0 && (
-                <span className="badge bg-danger ms-2">
-                  {unreadTotal > 99 ? "99+" : unreadTotal}
-                </span>
-              )}
-            </Link>
-          </li>
-        </ul>
+        <div className="flex-grow-1 p-4 overflow-auto">{children}</div>
       </div>
-
-      {/* Main Content */}
-      <div className="flex-grow-1 p-4">{children}</div>
     </div>
   );
 };

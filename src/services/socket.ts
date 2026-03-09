@@ -8,6 +8,20 @@ export interface MessagesSeenPayload {
   modifiedCount?: number
 }
 
+export interface MessageDeletedPayload {
+  messageId: string
+}
+
+export interface ReactionPayload {
+  messageId: string
+  emoji: string
+  userPhone: string
+}
+
+export interface MessageUpdatedPayload {
+  message: MessageResponse
+}
+
 class SocketService {
   private socket: Socket
 
@@ -38,6 +52,22 @@ class SocketService {
     this.socket.emit("markSeen", payload)
   }
 
+  deleteMessage(messageId: string) {
+    this.socket.emit("deleteMessage", { messageId })
+  }
+
+  updateMessage(messageId: string) {
+    this.socket.emit("updateMessage", { messageId })
+  }
+
+  addReaction(messageId: string, emoji: string, userPhone: string) {
+    this.socket.emit("addReaction", { messageId, emoji, userPhone })
+  }
+
+  removeReaction(messageId: string, emoji: string, userPhone: string) {
+    this.socket.emit("removeReaction", { messageId, emoji, userPhone })
+  }
+
   onReceiveMessage(callback: (msg: MessageResponse) => void) {
     this.socket.on("receiveMessage", callback)
   }
@@ -52,6 +82,38 @@ class SocketService {
 
   offMessagesSeen(callback?: (payload: MessagesSeenPayload) => void) {
     this.socket.off("messagesSeen", callback as any)
+  }
+
+  onMessageDeleted(callback: (payload: MessageDeletedPayload) => void) {
+    this.socket.on("messageDeleted", callback)
+  }
+
+  offMessageDeleted(callback?: (payload: MessageDeletedPayload) => void) {
+    this.socket.off("messageDeleted", callback as any)
+  }
+
+  onMessageUpdated(callback: (payload: MessageUpdatedPayload) => void) {
+    this.socket.on("messageUpdated", callback)
+  }
+
+  offMessageUpdated(callback?: (payload: MessageUpdatedPayload) => void) {
+    this.socket.off("messageUpdated", callback as any)
+  }
+
+  onReactionAdded(callback: (payload: ReactionPayload) => void) {
+    this.socket.on("reactionAdded", callback)
+  }
+
+  offReactionAdded(callback?: (payload: ReactionPayload) => void) {
+    this.socket.off("reactionAdded", callback as any)
+  }
+
+  onReactionRemoved(callback: (payload: ReactionPayload) => void) {
+    this.socket.on("reactionRemoved", callback)
+  }
+
+  offReactionRemoved(callback?: (payload: ReactionPayload) => void) {
+    this.socket.off("reactionRemoved", callback as any)
   }
 }
 
