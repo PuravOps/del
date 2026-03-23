@@ -22,6 +22,7 @@ const Layout = ({ children }: Props) => {
   const [isMobileLayout, setIsMobileLayout] = useState(false);
   const [isNavOpen, setIsNavOpen] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [socketConnected, setSocketConnected] = useState(false);
 
   const location = useLocation();
   const isPageActive = usePageActivity();
@@ -93,6 +94,10 @@ const Layout = ({ children }: Props) => {
     if (!token || !userPhone) return;
 
     socketService.connect(userPhone);
+    const onConn = () => setSocketConnected(true)
+    const onDisc = () => setSocketConnected(false)
+    socketService.onConnect(onConn)
+    socketService.onDisconnect(onDisc)
 
     void refreshUnseenTotal();
     void ping();
@@ -104,6 +109,8 @@ const Layout = ({ children }: Props) => {
     return () => {
       window.clearInterval(interval);
       socketService.disconnect();
+      socketService.offConnect(onConn)
+      socketService.offDisconnect(onDisc)
     };
   }, [token, userPhone, refreshUnseenTotal]);
 
@@ -219,6 +226,8 @@ const Layout = ({ children }: Props) => {
   return !token ? (
     <div className="min-vh-100 bg-body">
       <div className="d-flex justify-content-end p-3">
+        <div style={{display:'flex', gap:8, alignItems:'center'}}>
+          <div style={{width:10, height:10, borderRadius:10, background: socketConnected ? '#0d6efd' : '#dee2e6' }} title={socketConnected ? 'Connected' : 'Disconnected'} />
         <button
           type="button"
           className="btn btn-outline-secondary btn-sm"
@@ -228,6 +237,7 @@ const Layout = ({ children }: Props) => {
         >
           {theme === "dark" ? "\u2600\uFE0F" : "\u{1F319}"}
         </button>
+        </div>
       </div>
       {children}
     </div>

@@ -1,6 +1,8 @@
 ﻿import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react"
 import { getMessages, getUnseenCounts, getUsers, deleteMessage, updateMessage, addReaction, removeReaction } from "../services/api"
 import { socketService } from "./ChatService"
+import TicTacToeCard from "../components/TicTacToeCard"
+import { encodeGameMessage, decodeGameMessage, type TicTacToePayloadV1 } from "../utils/gameMessage"
 import type { MessageResponse, SendMessagePayload, Reaction } from "../types/chat.types"
 import { usePageActivity } from "../utils/usePageActivity"
 import {
@@ -101,7 +103,7 @@ const Chat = () => {
     | null
   >(null)
 
-  const inputRef = useRef<HTMLInputElement | null>(null)
+  const inputRef = useRef<HTMLTextAreaElement | null>(null)
   const messagesContainerRef = useRef<HTMLDivElement | null>(null)
   const messagesEndRef = useRef<HTMLDivElement | null>(null)
   const oldestCursorRef = useRef<string | null>(null)
@@ -531,6 +533,49 @@ const Chat = () => {
     return null
   }, [filteredMessages, sender])
 
+  const startTicTacToe = async () => {
+    if (!selectedUser || !sender) return
+    const gameId = `t3-${Date.now()}`
+    const localName =
+      (localStorage.getItem("userName") ?? "").trim() ||
+      users.find((u) => u.phone === sender)?.name ||
+      sender
+    const payload: TicTacToePayloadV1 = {
+      v: 1,
+      type: "tictactoe",
+      gameId,
+      board: ["", "", "", "", "", "", "", "", ""],
+      currentTurn: "sender",
+      players: {
+        sender: { id: sender, name: localName },
+        receiver: { id: selectedUser.phone, name: selectedUser.name },
+      },
+    }
+
+    const encoded = encodeGameMessage(payload)
+
+    // append locally as a system message so it appears in the thread immediately
+    const now = new Date().toISOString()
+    const systemMsg = {
+      _id: gameId,
+      gameId: gameId,
+      sender: sender,
+      receiver: selectedUser.phone,
+      message: encoded,
+      createdAt: now,
+      updatedAt: now,
+    }
+    setMessages((prev) => [...prev, systemMsg as any])
+
+    // notify server/peer — host app/socket should persist and broadcast the encoded game message
+    try {
+      socketService.sendMessage({ sender, receiver: selectedUser.phone, message: encoded })
+    } catch (e) {
+      console.error("Failed to send tic-tac-toe start", e)
+    }
+    window.requestAnimationFrame(() => scrollToBottom("smooth"))
+  }
+
   const emojis = useMemo(
     () => ["\u{1F600}", "\u{1F601}", "\u{1F602}", "\u{1F923}", "\u{1F60A}", "\u{1F60D}", "\u{1F618}", "\u{1F60E}", "\u{1F914}", "\u{1F622}", "\u{1F621}", "\u{1F44D}", "\u{1F44E}", "\u{1F64F}", "\u{1F44F}", "\u{1F389}", "\u2764\uFE0F", "\u{1F525}"],
     [],
@@ -546,14 +591,34 @@ const Chat = () => {
     if (!sender) return
 
     const handleReceive = (msg: MessageResponse) => {
+      // diagnostic log
+      // eslint-disable-next-line no-console
+      console.info("Chat.handleReceive", { id: msg._id, gameId: (msg as any).gameId, sender: msg.sender, receiver: msg.receiver, selectedUser: selectedUser?.phone })
+
       const isCurrentThread = Boolean(
         selectedUser &&
           ((msg.sender === sender && msg.receiver === selectedUser.phone) ||
             (msg.sender === selectedUser.phone && msg.receiver === sender)),
       )
+      // eslint-disable-next-line no-console
+      console.info("Chat.isCurrentThread", isCurrentThread)
 
       if (isCurrentThread) {
-        setMessages((prev) => [...prev, msg])
+        setMessages((prev) => {
+          const exists = prev.some((m) => m._id === msg._id || ((msg as any).gameId && m._id === (msg as any).gameId))
+          // eslint-disable-next-line no-console
+          console.info("Chat.updateMessages.exists", exists, { incomingId: msg._id, incomingGameId: (msg as any).gameId })
+          if (exists) {
+            // eslint-disable-next-line no-console
+            console.info("Chat.updateMessages: replacing message", { matchId: msg._id || (msg as any).gameId })
+            return prev.map((m) =>
+              m._id === msg._id || ((msg as any).gameId && m._id === (msg as any).gameId) ? msg : m,
+            )
+          }
+          // eslint-disable-next-line no-console
+          console.info("Chat.updateMessages: appending message", { incomingId: msg._id, incomingGameId: (msg as any).gameId })
+          return [...prev, msg]
+        })
       }
 
       if (msg.receiver !== sender) return
@@ -577,9 +642,24 @@ const Chat = () => {
     }
 
     socketService.onReceiveMessage(handleReceive)
+    // game-specific handlers: ensure game updates always merge into messages
+    const handleGameUpdate = (msg: MessageResponse) => {
+      // eslint-disable-next-line no-console
+      console.info("Chat.handleGameUpdate", { id: msg._id, gameId: (msg as any).gameId })
+      setMessages((prev) => {
+        const exists = prev.some((m) => m._id === msg._id || ((msg as any).gameId && m._id === (msg as any).gameId))
+        if (exists) return prev.map((m) => (m._id === msg._id || ((msg as any).gameId && m._id === (msg as any).gameId) ? msg : m))
+        return [...prev, msg]
+      })
+    }
+
+    socketService.onGameUpdated(handleGameUpdate)
+    socketService.onGameCreated(handleGameUpdate)
 
     return () => {
       socketService.offReceiveMessage(handleReceive)
+      socketService.offGameUpdated(handleGameUpdate)
+      socketService.offGameCreated(handleGameUpdate)
     }
   }, [sender, selectedUser, isPageActive])
 
@@ -651,19 +731,22 @@ const Chat = () => {
       setMessages((prev) =>
         prev.map((m) =>
           m._id === payload.messageId
-            ? {
-                ...m,
-                reactions: [
-                  ...(m.reactions?.filter((r) => r.emoji !== payload.emoji) ?? []),
-                  {
-                    emoji: payload.emoji,
-                    users: [
-                      ...(m.reactions?.find((r) => r.emoji === payload.emoji)?.users ?? []),
-                      payload.userPhone,
-                    ].filter((u, i, arr) => arr.indexOf(u) === i),
-                  },
-                ],
-              }
+            ? (() => {
+                // one reaction per user: remove from any previous emoji first
+                const cleaned = (m.reactions ?? [])
+                  .map((r) => ({ ...r, users: r.users.filter((u) => u !== payload.userPhone) }))
+                  .filter((r) => r.users.length > 0)
+
+                const idx = cleaned.findIndex((r) => r.emoji === payload.emoji)
+                if (idx >= 0) {
+                  const users = Array.from(new Set([...cleaned[idx].users, payload.userPhone]))
+                  cleaned[idx] = { ...cleaned[idx], users }
+                } else {
+                  cleaned.push({ emoji: payload.emoji, users: [payload.userPhone] })
+                }
+
+                return { ...m, reactions: cleaned }
+              })()
             : m,
         ),
       )
@@ -980,6 +1063,52 @@ const Chat = () => {
     // }
   }
 
+  const applyReactionLocally = (
+    messageId: string,
+    emoji: string,
+    userPhone: string,
+    add: boolean,
+  ) => {
+    setMessages((prev) =>
+      prev.map((m) => {
+        if (m._id !== messageId) return m
+        const nextReactions = (m.reactions ?? []).slice()
+
+        if (add) {
+          // one reaction per user per message:
+          // remove this user from any previous emoji first
+          for (let i = nextReactions.length - 1; i >= 0; i -= 1) {
+            const users = nextReactions[i].users.filter((u) => u !== userPhone)
+            if (users.length === 0) nextReactions.splice(i, 1)
+            else nextReactions[i] = { ...nextReactions[i], users }
+          }
+
+          const idx = nextReactions.findIndex((r) => r.emoji === emoji)
+          if (idx >= 0) {
+            const users = Array.from(new Set([...nextReactions[idx].users, userPhone]))
+            nextReactions[idx] = { ...nextReactions[idx], users }
+          } else {
+            nextReactions.push({ emoji, users: [userPhone] })
+          }
+        } else {
+          const idx = nextReactions.findIndex((r) => r.emoji === emoji)
+          if (idx >= 0) {
+            const users = nextReactions[idx].users.filter((u) => u !== userPhone)
+            if (users.length === 0) nextReactions.splice(idx, 1)
+            else nextReactions[idx] = { ...nextReactions[idx], users }
+          }
+        }
+
+        return { ...m, reactions: nextReactions }
+      }),
+    )
+  }
+
+  const getMyReactionEmoji = useCallback((m: MessageResponse, userPhone: string) => {
+    const hit = m.reactions?.find((r) => r.users.includes(userPhone))
+    return hit?.emoji ?? null
+  }, [])
+
   const messageItems = useMemo(() => {
     const items: Array<
       | { type: "date"; key: string; label: string }
@@ -1151,16 +1280,28 @@ const Chat = () => {
               "Select a user"
             )}
           </div>
-          <button
-            type="button"
-            className={`btn btn-sm ${
-              privacyMode ? "btn-warning" : "btn-outline-warning"
-            }`}
-            onClick={() => setPrivacyMode(!privacyMode)}
-            title={privacyMode ? "Privacy Mode: ON - Messages are blurred" : "Privacy Mode: OFF"}
-          >
-            {"\u{1F512}"} {privacyMode ? "Privacy: ON" : "Privacy: OFF"}
-          </button>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <button
+              type="button"
+              className="btn btn-sm btn-outline-primary"
+              onClick={() => startTicTacToe()}
+              title="Start Tic-Tac-Toe"
+              aria-label="Start Tic-Tac-Toe"
+            >
+              {"\u274C"}
+              {"\u2B55"}
+            </button>
+            <button
+              type="button"
+              className={`btn btn-sm ${
+                privacyMode ? "btn-warning" : "btn-outline-warning"
+              }`}
+              onClick={() => setPrivacyMode(!privacyMode)}
+              title={privacyMode ? "Privacy Mode: ON - Messages are blurred" : "Privacy Mode: OFF"}
+            >
+              {"\u{1F512}"} {privacyMode ? "Privacy: ON" : "Privacy: OFF"}
+            </button>
+          </div>
         </div>
 
         {/* Messages */}
@@ -1196,6 +1337,82 @@ const Chat = () => {
             }
 
             const m = item.msg
+            // detect inline game message
+            const gameDecoded = decodeGameMessage(m.message ?? "")
+            if (gameDecoded.kind === "game") {
+              const g = gameDecoded.value
+              return (
+                <div key={item.key} className="d-flex justify-content-center my-2">
+                  <div
+                    style={{
+                      filter: privacyMode ? "blur(10px)" : undefined,
+                      transition: privacyMode ? "filter 0.2s ease" : undefined,
+                    }}
+                  >
+                    <TicTacToeCard
+                      gameId={g.gameId}
+                      players={{ sender: { id: g.players.sender.id, name: g.players.sender.name }, receiver: { id: g.players.receiver.id, name: g.players.receiver.name } }}
+                      board={g.board}
+                      currentTurn={g.currentTurn}
+                      onMove={(gameId, index) => {
+                        // optimistic local update for responsiveness
+                        const next: TicTacToePayloadV1 = {
+                          ...g,
+                          board: [...g.board],
+                          currentTurn: g.currentTurn === "sender" ? "receiver" : "sender",
+                        }
+                        if (next.board[index] !== "") return
+                        next.board[index] = g.currentTurn === "sender" ? "X" : "O"
+                        const encoded = encodeGameMessage(next)
+                        setMessages((prev) => prev.map((mm) => (mm._id === m._id ? { ...mm, message: encoded, updatedAt: new Date().toISOString() } : mm)))
+                        try {
+                          socketService.sendGameMove(gameId, index, sender)
+                        } catch (e) {
+                          console.error("Failed to send game move", e)
+                        }
+                        // Also call REST fallback to ensure DB persistence if socket fails
+                        // (async () => {
+                        //   try {
+                        //     const res = await fetch(`/api/chat/games/${encodeURIComponent(gameId)}/move`, {
+                        //       method: "POST",
+                        //       headers: { "Content-Type": "application/json" },
+                        //       body: JSON.stringify({ index, playerId: sender }),
+                        //     })
+                        //     if (res.ok) {
+                        //       const updated = await res.json()
+                        //       setMessages((prev) => prev.map((mm) => (mm._id === m._id || (updated.gameId && mm._id === updated.gameId) ? updated : mm)))
+                        //     } else {
+                        //       // eslint-disable-next-line no-console
+                        //       console.warn("game move REST fallback failed", await res.text())
+                        //     }
+                        //   } catch (err) {
+                        //     // eslint-disable-next-line no-console
+                        //     console.error("game move REST fallback error", err)
+                        //   }
+                        // })()
+                      }}
+                      onRematch={(gameId) => {
+                        // optimistically show reset; server will create new game instance and broadcast
+                        const emptyBoard: TicTacToePayloadV1["board"] = ["", "", "", "", "", "", "", "", ""]
+                        const reset: TicTacToePayloadV1 = {
+                          ...g,
+                          board: emptyBoard,
+                          currentTurn: "sender",
+                          gameId: `t3-${Date.now()}`,
+                        }
+                        const encoded = encodeGameMessage(reset)
+                        setMessages((prev) => prev.map((mm) => (mm._id === m._id ? { ...mm, message: encoded, updatedAt: new Date().toISOString() } : mm)))
+                        try {
+                          socketService.sendGameRematch(gameId, sender)
+                        } catch (e) {
+                          console.error("Failed to send rematch", e)
+                        }
+                      }}
+                    />
+                  </div>
+                </div>
+              )
+            }
             const isOutgoing = m.sender === sender
             const isLastOutgoing = isOutgoing && m._id === lastOutgoingMessageId
             const timeLabel = formatTimeLabel(m.createdAt)
@@ -1210,7 +1427,7 @@ const Chat = () => {
                     <img
                       src={plain}
                       alt="GIF"
-                      style={{ maxWidth: "50%", borderRadius: 8 }}
+                      style={{ width: 220, height: "auto", borderRadius: 8 }}
                       loading="lazy"
                     />
                   )
@@ -1246,8 +1463,8 @@ const Chat = () => {
                             src={msg.replyTo.previewGifUrl}
                             alt="Replied GIF"
                             style={{
-                              width: 46,
-                              height: 46,
+                              width: 80,
+                              height: 80,
                               objectFit: "cover",
                               borderRadius: 6,
                             }}
@@ -1269,7 +1486,7 @@ const Chat = () => {
                         <img
                           src={msg.gifUrl}
                           alt="GIF"
-                          style={{ maxWidth: "50%", borderRadius: 8 }}
+                          style={{ width: 220, height: "auto", borderRadius: 8 }}
                           loading="lazy"
                         />
                       )}
@@ -1304,6 +1521,8 @@ const Chat = () => {
                   style={{
                     maxWidth: "60%",
                     position: "relative",
+                    fontSize: "0.95rem",
+                    paddingBottom: m.reactions && m.reactions.length > 0 ? 28 : undefined,
                     outline: isHighlighted ? "2px solid var(--bs-warning)" : undefined,
                     outlineOffset: isHighlighted ? 2 : undefined,
                     filter: privacyMode ? "blur(10px)" : undefined,
@@ -1339,23 +1558,42 @@ const Chat = () => {
                       </>
                     )}
                   </div>
-                  
+
                   {m.reactions && m.reactions.length > 0 && (
-                    <div className="d-flex flex-wrap gap-1 mt-2">
+                    <div
+                      style={{
+                        marginTop: 6,
+                        width: "100%",
+                        display: "flex",
+                        gap: 6,
+                        flexWrap: "wrap",
+                        // outgoing(sender) -> bottom-left, incoming(receiver) -> bottom-right
+                        justifyContent: isOutgoing ? "flex-start" : "flex-end",
+                      }}
+                    >
                       {m.reactions.map((reaction) => (
                         <button
                           key={reaction.emoji}
                           type="button"
-                          className="btn btn-sm btn-outline-secondary p-1"
                           onClick={async () => {
-                            const hasReacted = reaction.users.includes(sender)
+                            const myEmoji = getMyReactionEmoji(m, sender)
+                            if (!myEmoji) return
+                            const isTogglingOff = myEmoji === reaction.emoji
+                            const targetEmoji = reaction.emoji
+
+                            applyReactionLocally(
+                              m._id,
+                              isTogglingOff ? myEmoji ?? targetEmoji : targetEmoji,
+                              sender,
+                              !isTogglingOff,
+                            )
                             try {
-                              if (hasReacted) {
-                                await removeReaction(m._id, reaction.emoji, sender)
-                                socketService.removeReaction(m._id, reaction.emoji, sender)
+                              if (isTogglingOff) {
+                                await removeReaction(m._id, targetEmoji, sender)
+                                socketService.removeReaction(m._id, targetEmoji, sender)
                               } else {
-                                await addReaction(m._id, reaction.emoji, sender)
-                                socketService.addReaction(m._id, reaction.emoji, sender)
+                                await addReaction(m._id, targetEmoji, sender)
+                                socketService.addReaction(m._id, targetEmoji, sender)
                               }
                             } catch (e) {
                               console.error("Failed to manage reaction", e)
@@ -1363,13 +1601,27 @@ const Chat = () => {
                           }}
                           title={`${reaction.users.join(", ")} reacted`}
                           style={{
-                            opacity: reaction.users.includes(sender) ? 1 : 0.6,
-                            borderColor: reaction.users.includes(sender)
-                              ? "var(--bs-primary)"
-                              : undefined,
+                            border: "1px solid rgba(0,0,0,0.12)",
+                            background: isOutgoing
+                              ? "rgba(255,255,255,0.92)"
+                              : "rgba(248,249,250,0.95)",
+                            color: "#212529",
+                            borderRadius: 999,
+                            padding: "2px 8px",
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: 6,
+                            lineHeight: 1,
+                            fontSize: 13,
+                            cursor: getMyReactionEmoji(m, sender) ? "pointer" : "not-allowed",
+                            opacity: reaction.users.includes(sender) ? 1 : 0.7,
+                            fontFamily:
+                              "system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, Apple Color Emoji, Segoe UI Emoji, Noto Color Emoji",
                           }}
+                          disabled={!getMyReactionEmoji(m, sender)}
                         >
-                          {reaction.emoji} {reaction.users.length}
+                          <span style={{ fontSize: 15, lineHeight: 1 }}>{reaction.emoji}</span>
+                          <span style={{ fontSize: 12, lineHeight: 1 }}>{reaction.users.length}</span>
                         </button>
                       ))}
                     </div>
@@ -1397,11 +1649,11 @@ const Chat = () => {
                         type="button"
                         className="btn btn-link p-0"
                         onClick={async () => {
-                          const hasReacted = m.reactions
-                            ?.find((r) => r.emoji === emoji)
-                            ?.users.includes(sender)
+                          const myEmoji = getMyReactionEmoji(m, sender)
+                          const isTogglingOff = myEmoji === emoji
+                          applyReactionLocally(m._id, emoji, sender, !isTogglingOff)
                           try {
-                            if (hasReacted) {
+                            if (isTogglingOff) {
                               await removeReaction(m._id, emoji, sender)
                               socketService.removeReaction(m._id, emoji, sender)
                             } else {
@@ -1619,7 +1871,7 @@ const Chat = () => {
                       <img
                         src={replyTo.previewGifUrl}
                         alt="Replied GIF"
-                        style={{ width: 40, height: 40, objectFit: "cover", borderRadius: 6 }}
+                        style={{ width: 60, height: 60, objectFit: "cover", borderRadius: 6 }}
                         loading="lazy"
                       />
                       <div className="small text-truncate">{replyTo.previewText ?? "GIF"}</div>
@@ -1646,7 +1898,7 @@ const Chat = () => {
                   <img
                     src={selectedGifUrl}
                     alt="Selected GIF"
-                    style={{ width: 56, height: 56, objectFit: "cover", borderRadius: 8 }}
+                    style={{ width: 48, height: 48, objectFit: "cover", borderRadius: 8 }}
                     loading="lazy"
                   />
                   <div className="small text-truncate">GIF selected</div>
@@ -1763,7 +2015,7 @@ const Chat = () => {
                         <img
                           src={g.previewUrl ?? g.url}
                           alt="GIF option"
-                          style={{ width: "100%", height: 70, objectFit: "cover", borderRadius: 6 }}
+                          style={{ width: "100%", height: 80, objectFit: "cover", borderRadius: 6 }}
                           loading="lazy"
                         />
                       </button>
@@ -1810,14 +2062,19 @@ const Chat = () => {
               >
                 GIF
               </button>
-              <input
+              <textarea
                 ref={inputRef}
                 className="form-control me-2"
+                rows={3}
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key !== "Enter") return
                   if (e.nativeEvent.isComposing) return
+                  if (e.shiftKey) {
+                    // allow newline insertion
+                    return
+                  }
                   e.preventDefault()
                   void sendMessage()
                 }}

@@ -29,6 +29,32 @@ class SocketService {
     this.socket = io(import.meta.env.VITE_SOCKET_URI, {
       autoConnect: false,
     })
+
+    // lifecycle logging for debugging live issues
+    this.socket.on("connect", () => {
+      // eslint-disable-next-line no-console
+      console.info("socket connected", this.socket.id)
+    })
+    this.socket.on("disconnect", (reason) => {
+      // eslint-disable-next-line no-console
+      console.warn("socket disconnected", reason)
+    })
+    this.socket.on("connect_error", (err) => {
+      // eslint-disable-next-line no-console
+      console.error("socket connect_error", err)
+    })
+    this.socket.on("receiveMessage", (msg) => {
+      // eslint-disable-next-line no-console
+      console.info("socket received message", msg?._id, msg?.sender, "->", msg?.receiver)
+    })
+    this.socket.on("game.created", (msg) => {
+      // eslint-disable-next-line no-console
+      console.info("socket received game.created", (msg as any)?._id, (msg as any)?.gameId)
+    })
+    this.socket.on("game.updated", (msg) => {
+      // eslint-disable-next-line no-console
+      console.info("socket received game.updated", (msg as any)?._id, (msg as any)?.gameId)
+    })
   }
 
   connect(userId: string) {
@@ -45,6 +71,10 @@ class SocketService {
   }
 
   sendMessage(payload: SendMessagePayload) {
+    if (!this.socket.connected) {
+      // eslint-disable-next-line no-console
+      console.warn("sendMessage called but socket not connected", payload)
+    }
     this.socket.emit("sendMessage", payload)
   }
 
@@ -66,6 +96,23 @@ class SocketService {
 
   removeReaction(messageId: string, emoji: string, userPhone: string) {
     this.socket.emit("removeReaction", { messageId, emoji, userPhone })
+  }
+
+  // Game-specific helpers
+  sendGameMove(gameId: string, index: number, playerId: string) {
+    if (!this.socket.connected) {
+      // eslint-disable-next-line no-console
+      console.warn("sendGameMove called but socket not connected", { gameId, index, playerId })
+    }
+    this.socket.emit("game.move", { gameId, index, playerId })
+  }
+
+  sendGameRematch(gameId: string, requesterId: string) {
+    if (!this.socket.connected) {
+      // eslint-disable-next-line no-console
+      console.warn("sendGameRematch called but socket not connected", { gameId, requesterId })
+    }
+    this.socket.emit("game.rematch", { gameId, requesterId })
   }
 
   onReceiveMessage(callback: (msg: MessageResponse) => void) {
@@ -114,6 +161,39 @@ class SocketService {
 
   offReactionRemoved(callback?: (payload: ReactionPayload) => void) {
     this.socket.off("reactionRemoved", callback as any)
+  }
+
+  onConnect(callback: () => void) {
+    this.socket.on("connect", callback)
+  }
+
+  offConnect(callback?: () => void) {
+    this.socket.off("connect", callback as any)
+  }
+
+  onDisconnect(callback: (reason: string) => void) {
+    this.socket.on("disconnect", callback)
+  }
+
+  offDisconnect(callback?: (reason: string) => void) {
+    this.socket.off("disconnect", callback as any)
+  }
+
+  // Game-specific events
+  onGameCreated(callback: (msg: MessageResponse) => void) {
+    this.socket.on("game.created", callback)
+  }
+
+  offGameCreated(callback?: (msg: MessageResponse) => void) {
+    this.socket.off("game.created", callback as any)
+  }
+
+  onGameUpdated(callback: (msg: MessageResponse) => void) {
+    this.socket.on("game.updated", callback)
+  }
+
+  offGameUpdated(callback?: (msg: MessageResponse) => void) {
+    this.socket.off("game.updated", callback as any)
   }
 }
 
