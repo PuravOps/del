@@ -71,3 +71,16 @@ export default defineConfig([
   },
 ])
 ```
+
+## Uploads (Cloudinary via Node API)
+
+Chat supports uploading images/videos/PDFs (button next to Send) and pasting an image from the clipboard (Ctrl+V).
+
+Frontend uses `VITE_API_URI` and calls the backend endpoint `POST /api/uploads`.
+
+Backend (ChatGptAPI) must have Cloudinary env vars:
+
+- `CLOUDINARY_CLOUD_NAME`
+- `CLOUDINARY_API_KEY`
+- `CLOUDINARY_API_SECRET`
+- `CLOUDINARY_FOLDER` (optional)

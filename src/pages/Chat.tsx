@@ -1,10 +1,12 @@
 ﻿import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react"
+import type { ClipboardEvent, ChangeEvent } from "react"
 import { getMessages, getUnseenCounts, getUsers, deleteMessage, updateMessage, addReaction, removeReaction } from "../services/api"
 import { socketService } from "./ChatService"
 import TicTacToeCard from "../components/TicTacToeCard"
 import { encodeGameMessage, decodeGameMessage, type TicTacToePayloadV1 } from "../utils/gameMessage"
 import type { MessageResponse, SendMessagePayload, Reaction } from "../types/chat.types"
 import { usePageActivity } from "../utils/usePageActivity"
+import { uploadFileToApi } from "../utils/uploadApi"
 import {
   decodeRichMessage,
   encodeRichMessage,
@@ -102,8 +104,15 @@ const Chat = () => {
     | { kind: "rich"; value: RichChatMessageV1 }
     | null
   >(null)
+  const [uploadTasks, setUploadTasks] = useState<
+    Array<{ id: string; name: string; progress: number; error?: string }>
+  >([])
+  const [uploadError, setUploadError] = useState<string | null>(null)
+  const [imagePreview, setImagePreview] = useState<{ url: string; title?: string } | null>(null)
+  const [imagePreviewZoom, setImagePreviewZoom] = useState(1)
 
   const inputRef = useRef<HTMLTextAreaElement | null>(null)
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
   const messagesContainerRef = useRef<HTMLDivElement | null>(null)
   const messagesEndRef = useRef<HTMLDivElement | null>(null)
   const oldestCursorRef = useRef<string | null>(null)
@@ -189,6 +198,16 @@ const Chat = () => {
   }, [])
 
   useEffect(() => {
+    if (!imagePreview) return
+    setImagePreviewZoom(1)
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setImagePreview(null)
+    }
+    window.addEventListener("keydown", onKeyDown)
+    return () => window.removeEventListener("keydown", onKeyDown)
+  }, [imagePreview])
+
+  useEffect(() => {
     if (!messageMenu) return
 
     const onKeyDown = (e: KeyboardEvent) => {
@@ -208,6 +227,13 @@ const Chat = () => {
         const parts = []
         if (decoded.value.text) parts.push(decoded.value.text)
         if (decoded.value.gifUrl) parts.push(decoded.value.gifUrl)
+        return parts.join("\n")
+      }
+
+      if (decoded.value.type === "file") {
+        const parts = []
+        if (decoded.value.text) parts.push(decoded.value.text)
+        if (decoded.value.fileUrl) parts.push(decoded.value.fileUrl)
         return parts.join("\n")
       }
 
@@ -1013,6 +1039,122 @@ const Chat = () => {
     )
   }, [filteredMessages, selectedUser, sender, isPageActive])
 
+  const sendOutgoingTo = useCallback(
+    (receiverPhone: string, rawMessage: string, opts?: { clearInput?: boolean }) => {
+      if (!receiverPhone || !sender) return
+
+      const payload: SendMessagePayload = {
+        sender,
+        receiver: receiverPhone,
+        message: rawMessage,
+      }
+
+      socketService.sendMessage(payload)
+      setUnreadCounts((prev) => ({ ...prev, [receiverPhone]: 0 }))
+      socketService.markSeen({ sender: receiverPhone, receiver: sender })
+      window.dispatchEvent(new Event("unreadCountsChanged"))
+
+      const isCurrentThread = selectedUser?.phone === receiverPhone
+      if (opts?.clearInput && isCurrentThread) setInput("")
+      if (isCurrentThread) {
+        setReplyTo(null)
+        setSelectedGifUrl(null)
+        setShowEmojiPicker(false)
+        setShowGifPicker(false)
+      }
+      window.requestAnimationFrame(() => scrollToBottom("smooth"))
+    },
+    [scrollToBottom, selectedUser?.phone, sender],
+  )
+
+  const isAllowedUploadFile = useCallback((file: File) => {
+    const name = file.name.toLowerCase()
+    const isPdf = file.type === "application/pdf" || name.endsWith(".pdf")
+    const isImage = file.type.startsWith("image/")
+    const isVideo = file.type.startsWith("video/")
+    return isImage || isPdf || isVideo
+  }, [])
+
+  const uploadAndSendFiles = useCallback(
+    async (files: File[], opts?: { source: "picker" | "paste" }) => {
+      const receiverPhone = selectedUser?.phone
+      if (!receiverPhone || !sender) return
+      if (!files.length) return
+
+      setUploadError(null)
+
+      const allowed = files.filter(isAllowedUploadFile)
+      if (allowed.length === 0) {
+        setUploadError("Only images, videos and PDFs are supported.")
+        return
+      }
+
+      const caption = input.trim()
+      const shouldUseCaption = opts?.source === "paste" || allowed.length === 1
+      const replyPayload: RichReplyToV1 | undefined = replyTo
+        ? {
+            id: replyTo.id,
+            sender: replyTo.sender,
+            type: replyTo.type,
+            previewText: replyTo.previewText,
+            previewGifUrl: replyTo.type === "gif" ? replyTo.previewGifUrl : undefined,
+            previewFileUrl: replyTo.type === "file" ? replyTo.previewFileUrl : undefined,
+            previewFileMimeType: replyTo.type === "file" ? replyTo.previewFileMimeType : undefined,
+          }
+        : undefined
+
+      for (let idx = 0; idx < allowed.length; idx += 1) {
+        const file = allowed[idx]
+        const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`
+        setUploadTasks((prev) => [...prev, { id, name: file.name, progress: 0 }])
+
+        try {
+          const uploaded = await uploadFileToApi(file, {
+            onProgress: (pct) => {
+              setUploadTasks((prev) =>
+                prev.map((t) => (t.id === id ? { ...t, progress: pct } : t)),
+              )
+            },
+          })
+
+          const rt = uploaded.resourceType
+          const cloudinaryResourceType =
+            rt === "image" || rt === "video" || rt === "raw" || rt === "auto" ? rt : undefined
+
+          const message = encodeRichMessage({
+            v: 1,
+            type: "file",
+            fileUrl: uploaded.url,
+            fileName: uploaded.fileName ?? file.name,
+            mimeType: uploaded.mimeType ?? (file.type || undefined),
+            sizeBytes: uploaded.bytes ?? file.size,
+            cloudinaryPublicId: uploaded.publicId,
+            cloudinaryResourceType,
+            text: shouldUseCaption && idx === 0 ? caption || undefined : undefined,
+            replyTo: replyPayload,
+          })
+
+          sendOutgoingTo(receiverPhone, message, {
+            clearInput: Boolean(shouldUseCaption && idx === 0 && caption),
+          })
+        } catch (err) {
+          console.error("Upload failed", err)
+          const message =
+            err instanceof Error && err.message
+              ? err.message
+              : "Upload failed. Check API/Cloudinary config or try again."
+          setUploadError(message)
+          setUploadTasks((prev) =>
+            prev.map((t) => (t.id === id ? { ...t, error: "Upload failed" } : t)),
+          )
+        } finally {
+          setUploadTasks((prev) => prev.filter((t) => t.id !== id))
+        }
+      }
+    },
+    [input, isAllowedUploadFile, replyTo, selectedUser?.phone, sendOutgoingTo, sender],
+  )
+
   const sendMessage = async () => {
     const trimmed = input.trim()
     if (!selectedUser || !sender) return
@@ -1069,7 +1211,9 @@ const Chat = () => {
           sender: replyTo.sender,
           type: replyTo.type,
           previewText: replyTo.previewText,
-          previewGifUrl: replyTo.previewGifUrl,
+          previewGifUrl: replyTo.type === "gif" ? replyTo.previewGifUrl : undefined,
+          previewFileUrl: replyTo.type === "file" ? replyTo.previewFileUrl : undefined,
+          previewFileMimeType: replyTo.type === "file" ? replyTo.previewFileMimeType : undefined,
         }
       : undefined
 
@@ -1083,22 +1227,7 @@ const Chat = () => {
         })
       : trimmed
 
-    const payload: SendMessagePayload = {
-      sender,
-      receiver: selectedUser.phone,
-      message: outgoingMessage,
-    }
-
-    socketService.sendMessage(payload)
-    setUnreadCounts((prev) => ({ ...prev, [selectedUser.phone]: 0 }))
-    socketService.markSeen({ sender: selectedUser.phone, receiver: sender })
-    window.dispatchEvent(new Event("unreadCountsChanged"))
-    setInput("")
-    setReplyTo(null)
-    setSelectedGifUrl(null)
-    setShowEmojiPicker(false)
-    setShowGifPicker(false)
-    scrollToBottom("smooth")
+    sendOutgoingTo(selectedUser.phone, outgoingMessage, { clearInput: true })
 
     // try {
     //   await saveMessage(payload)
@@ -1107,6 +1236,45 @@ const Chat = () => {
     //   setSendError("Message sent, but it wasn't saved. Check API/DB logs.")
     // }
   }
+
+  const onPickFiles = useCallback(() => {
+    if (editingMessageId) return
+    fileInputRef.current?.click()
+  }, [editingMessageId])
+
+  const onFileInputChange = useCallback(
+    (e: ChangeEvent<HTMLInputElement>) => {
+      const files = Array.from(e.target.files ?? [])
+      e.target.value = ""
+      if (!files.length) return
+      void uploadAndSendFiles(files, { source: "picker" })
+    },
+    [uploadAndSendFiles],
+  )
+
+  const onPasteUpload = useCallback(
+    (e: ClipboardEvent<HTMLTextAreaElement>) => {
+      if (editingMessageId) return
+
+      const items = e.clipboardData?.items
+      if (!items) return
+
+      const files: File[] = []
+      for (const item of Array.from(items)) {
+        if (item.kind !== "file") continue
+        const f = item.getAsFile()
+        if (f) files.push(f)
+      }
+
+      if (files.length === 0) return
+      const allowed = files.filter(isAllowedUploadFile)
+      if (allowed.length === 0) return
+
+      e.preventDefault()
+      void uploadAndSendFiles(allowed, { source: "paste" })
+    },
+    [editingMessageId, isAllowedUploadFile, uploadAndSendFiles],
+  )
 
   const applyReactionLocally = (
     messageId: string,
@@ -1192,6 +1360,123 @@ const Chat = () => {
 
   return (
     <div className="d-flex position-relative" style={{ height: "80vh", border: "1px solid #ddd" }}>
+      {imagePreview && (
+        <>
+          <div
+            className="position-fixed top-0 start-0 w-100 h-100"
+            style={{ background: "rgba(0,0,0,0.6)", zIndex: 2000 }}
+            role="presentation"
+            onClick={() => setImagePreview(null)}
+          />
+          <div
+            className="position-fixed top-50 start-50 translate-middle bg-body rounded shadow"
+            style={{ zIndex: 2001, width: "min(88vw, 680px)", maxHeight: "86vh" }}
+            role="dialog"
+            aria-modal="true"
+            aria-label={imagePreview.title ?? "Image preview"}
+          >
+            <div className="d-flex align-items-center justify-content-between p-2 border-bottom">
+              <div className="small fw-semibold text-truncate" style={{ minWidth: 0 }}>
+                {imagePreview.title ?? "Preview"}
+              </div>
+              <div className="d-flex align-items-center gap-2">
+                <div className="btn-group" role="group" aria-label="Zoom controls">
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-outline-secondary"
+                    onClick={() =>
+                      setImagePreviewZoom((z) => Math.max(1, Math.round((z - 0.25) * 100) / 100))
+                    }
+                    disabled={imagePreviewZoom <= 1}
+                    title="Zoom out"
+                    aria-label="Zoom out"
+                  >
+                    -
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-outline-secondary"
+                    onClick={() => setImagePreviewZoom(1)}
+                    disabled={imagePreviewZoom === 1}
+                    title="Reset zoom"
+                    aria-label="Reset zoom"
+                  >
+                    {Math.round(imagePreviewZoom * 100)}%
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-outline-secondary"
+                    onClick={() =>
+                      setImagePreviewZoom((z) => Math.min(5, Math.round((z + 0.25) * 100) / 100))
+                    }
+                    title="Zoom in"
+                    aria-label="Zoom in"
+                  >
+                    +
+                  </button>
+                </div>
+                <a
+                  href={imagePreview.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="btn btn-sm btn-outline-secondary"
+                >
+                  Open
+                </a>
+                <button
+                  type="button"
+                  className="btn btn-sm btn-outline-secondary"
+                  onClick={() => setImagePreview(null)}
+                  aria-label="Close preview"
+                  title="Close"
+                >
+                  {"\u2715"}
+                </button>
+              </div>
+            </div>
+            <div
+              className="p-2"
+              style={{
+                maxHeight: "calc(86vh - 44px)",
+                overflow: "auto",
+                display: "flex",
+                justifyContent: "center",
+              }}
+              onWheel={(e) => {
+                if (!e.ctrlKey) return
+                e.preventDefault()
+                const delta = e.deltaY > 0 ? -0.15 : 0.15
+                setImagePreviewZoom((z) =>
+                  Math.min(5, Math.max(1, Math.round((z + delta) * 100) / 100)),
+                )
+              }}
+            >
+              <img
+                src={imagePreview.url}
+                alt={imagePreview.title ?? "Image preview"}
+                style={{
+                  maxWidth: imagePreviewZoom === 1 ? "100%" : undefined,
+                  maxHeight: imagePreviewZoom === 1 ? "78vh" : undefined,
+                  borderRadius: 8,
+                  transform: `scale(${imagePreviewZoom})`,
+                  transformOrigin: "center center",
+                  transition: "transform 0.08s ease-out",
+                  cursor: imagePreviewZoom > 1 ? "zoom-out" : "zoom-in",
+                }}
+                onDoubleClick={() => {
+                  setImagePreviewZoom((z) => (z === 1 ? 2 : 1))
+                }}
+                onClick={(e) => {
+                  // don't close modal when clicking image itself
+                  e.stopPropagation()
+                  // quick toggle when zoom not changed much
+                  if (imagePreviewZoom === 1) setImagePreviewZoom(2)
+                }}
+              />
+            </div>
+          </div>
+        </>
+      )}
       {/* Side drawer (mobile user list) */}
       {isMobileLayout && isDrawerOpen && (
         <div
@@ -1484,20 +1769,29 @@ const Chat = () => {
             const timeLabel = formatTimeLabel(m.createdAt)
             const decoded = decodeRichMessage(m.message)
             const isHighlighted = highlightedMessageId === m._id
-            const bubble = (() => {
-              if (decoded.kind === "plain") {
-                const plain = decoded.value.trim()
-                const looksLikeSingleGifUrl = isLikelyGifUrl(plain) && !/\s/.test(plain)
-                if (looksLikeSingleGifUrl) {
-                  return (
-                    <img
-                      src={plain}
-                      alt="GIF"
-                      style={{ width: 220, height: "auto", borderRadius: 8 }}
-                      loading="lazy"
-                    />
-                  )
-                }
+                const bubble = (() => {
+                  if (decoded.kind === "plain") {
+                    const plain = decoded.value.trim()
+                    const looksLikeSingleGifUrl = isLikelyGifUrl(plain) && !/\s/.test(plain)
+                    if (looksLikeSingleGifUrl) {
+                      return (
+                        <img
+                          src={plain}
+                          alt="GIF"
+                          style={{ width: 220, height: "auto", borderRadius: 8 }}
+                          loading="lazy"
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => setImagePreview({ url: plain, title: "GIF" })}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault()
+                              setImagePreview({ url: plain, title: "GIF" })
+                            }
+                          }}
+                        />
+                      )
+                    }
 
                 return (
                   <div style={{ whiteSpace: "pre-wrap" }}>
@@ -1540,6 +1834,25 @@ const Chat = () => {
                             {msg.replyTo.previewText ?? "GIF"}
                           </div>
                         </div>
+                      ) : msg.replyTo.type === "file" &&
+                        msg.replyTo.previewFileUrl &&
+                        msg.replyTo.previewFileMimeType?.startsWith("image/") ? (
+                        <div className="d-flex align-items-center gap-2 mt-1">
+                          <img
+                            src={msg.replyTo.previewFileUrl}
+                            alt="Replied image"
+                            style={{
+                              width: 80,
+                              height: 80,
+                              objectFit: "cover",
+                              borderRadius: 6,
+                            }}
+                            loading="lazy"
+                          />
+                          <div className="small text-truncate">
+                            {msg.replyTo.previewText ?? "Image"}
+                          </div>
+                        </div>
                       ) : (
                         <div className="small text-truncate">{msg.replyTo.previewText ?? ""}</div>
                       )}
@@ -1554,6 +1867,15 @@ const Chat = () => {
                           alt="GIF"
                           style={{ width: 220, height: "auto", borderRadius: 8 }}
                           loading="lazy"
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => setImagePreview({ url: msg.gifUrl!, title: "GIF" })}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault()
+                              setImagePreview({ url: msg.gifUrl!, title: "GIF" })
+                            }
+                          }}
                         />
                       )}
                       {msg.text && (
@@ -1562,6 +1884,63 @@ const Chat = () => {
                         </div>
                       )}
                     </div>
+                  ) : msg.type === "file" ? (
+                    (() => {
+                      const url = msg.fileUrl
+                      const isImage =
+                        msg.mimeType?.startsWith("image/") ||
+                        /\.(png|jpe?g|webp|gif|bmp|svg)$/i.test(url.toLowerCase())
+                      const isVideo =
+                        msg.mimeType?.startsWith("video/") ||
+                        /\.(mp4|webm|ogg|mov|m4v|avi|mkv)$/i.test(url.toLowerCase())
+                      const linkClass = isOutgoing ? "link-light" : "link-primary"
+                      return (
+                        <div>
+                          {isImage ? (
+                            <button
+                              type="button"
+                              className={`btn p-0 border-0 ${linkClass}`}
+                              onClick={() => setImagePreview({ url, title: msg.fileName ?? "Image" })}
+                              title="Preview image"
+                              aria-label="Preview image"
+                              style={{
+                                background: "transparent",
+                                boxShadow: "none",
+                                display: "inline-flex",
+                              }}
+                            >
+                              <img
+                                src={url}
+                                alt={msg.fileName ?? "Image"}
+                                style={{ width: 220, height: "auto", borderRadius: 8 }}
+                                loading="lazy"
+                              />
+                            </button>
+                          ) : isVideo ? (
+                            <video
+                              src={url}
+                              controls
+                              style={{ width: 240, maxWidth: "100%", borderRadius: 8 }}
+                            />
+                          ) : (
+                            <a
+                              href={url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className={linkClass}
+                              style={{ wordBreak: "break-word" }}
+                            >
+                              {msg.fileName ?? "Attachment"}
+                            </a>
+                          )}
+                          {msg.text && (
+                            <div style={{ whiteSpace: "pre-wrap" }} className="mt-2">
+                              {msg.text}
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })()
                   ) : (
                     <div style={{ whiteSpace: "pre-wrap" }}>{msg.text ?? ""}</div>
                   )}
@@ -1867,7 +2246,12 @@ const Chat = () => {
                           }
                         }}
                       >
-                        Delete Message
+                        {(() => {
+                          const mm = messages.find((x) => x._id === messageMenu.messageId)
+                          const d = mm ? decodeRichMessage(mm.message) : null
+                          if (d && d.kind === "rich" && d.value.type === "file") return "Delete File"
+                          return "Delete Message"
+                        })()}
                       </button>
                     )}
                   </>
@@ -1882,6 +2266,17 @@ const Chat = () => {
           <div className="p-3 border-top">
             {sendError && (
               <div className="alert alert-warning py-2 mb-2">{sendError}</div>
+            )}
+            {uploadError && (
+              <div className="alert alert-warning py-2 mb-2">{uploadError}</div>
+            )}
+            {uploadTasks.length > 0 && (
+              <div className="border rounded bg-body p-2 mb-2">
+                <div className="small fw-semibold">Uploading…</div>
+                <div className="small text-body-secondary">
+                  {uploadTasks.map((t) => `${t.name} (${t.progress}%)`).join(" · ")}
+                </div>
+              </div>
             )}
             {editingMessageId && (
               <div className="border rounded bg-body p-2 mb-2 d-flex align-items-start justify-content-between gap-2">
@@ -1941,6 +2336,20 @@ const Chat = () => {
                         loading="lazy"
                       />
                       <div className="small text-truncate">{replyTo.previewText ?? "GIF"}</div>
+                    </div>
+                  ) : replyTo.type === "file" &&
+                    replyTo.previewFileUrl &&
+                    replyTo.previewFileMimeType?.startsWith("image/") ? (
+                    <div className="d-flex align-items-center gap-2 mt-1">
+                      <img
+                        src={replyTo.previewFileUrl}
+                        alt="Replied image"
+                        style={{ width: 60, height: 60, objectFit: "cover", borderRadius: 6 }}
+                        loading="lazy"
+                      />
+                      <div className="small text-truncate">
+                        {replyTo.previewText ?? "Image"}
+                      </div>
                     </div>
                   ) : (
                     <div className="small text-truncate">{replyTo.previewText ?? ""}</div>
@@ -2102,6 +2511,14 @@ const Chat = () => {
             )}
 
             <div className="d-flex align-items-center">
+              <input
+                ref={fileInputRef}
+                type="file"
+                className="d-none"
+                accept="image/*,video/*,application/pdf"
+                multiple
+                onChange={onFileInputChange}
+              />
               <button
                 type="button"
                 className="btn btn-outline-secondary me-2"
@@ -2128,12 +2545,23 @@ const Chat = () => {
               >
                 GIF
               </button>
+              <button
+                type="button"
+                className="btn btn-outline-secondary me-2"
+                onClick={onPickFiles}
+                aria-label="Upload file"
+                title="Upload image/PDF"
+                disabled={Boolean(editingMessageId)}
+              >
+                {"\u{1F4CE}"}
+              </button>
               <textarea
                 ref={inputRef}
                 className="form-control me-2"
                 rows={3}
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
+                onPaste={onPasteUpload}
                 onKeyDown={(e) => {
                   if (e.key !== "Enter") return
                   if (e.nativeEvent.isComposing) return
