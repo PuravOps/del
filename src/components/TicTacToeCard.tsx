@@ -1,4 +1,4 @@
-﻿import React, { useMemo, useEffect, useState } from "react"
+﻿import React, { useMemo, useEffect } from "react"
 
 type Cell = "" | "X" | "O"
 
@@ -15,6 +15,7 @@ interface Props {
   // callbacks: host app should wire these to the shared backing (socket/API)
   onMove?: (gameId: string, index: number) => void
   onRematch?: (gameId: string) => void
+  onDelete?: () => void | Promise<void>
   className?: string
 }
 
@@ -45,6 +46,7 @@ const TicTacToeCard: React.FC<Props> = ({
   currentTurn = "sender",
   onMove,
   onRematch,
+  onDelete,
   className,
 }) => {
   const normalizedBoard = useMemo<Cell[]>(() => {
@@ -78,13 +80,6 @@ const TicTacToeCard: React.FC<Props> = ({
     !myPhone ? null : senderMatch && !receiverMatch ? "sender" : receiverMatch && !senderMatch ? "receiver" : null
 
   const winner = useMemo(() => getWinner(normalizedBoard), [normalizedBoard])
-  const [winFxNonce, setWinFxNonce] = useState(0)
-
-  useEffect(() => {
-    if (winner === "X" || winner === "O") {
-      setWinFxNonce((n) => n + 1)
-    }
-  }, [winner])
 
   useEffect(() => {
     // small accessibility: announce turn changes (host app should do better i18n)
@@ -103,12 +98,6 @@ const TicTacToeCard: React.FC<Props> = ({
     onMove?.(gameId, i)
   }
 
-  const labelFor = (sym: Cell) => {
-    if (sym === "X") return players.sender.name
-    if (sym === "O") return players.receiver.name
-    return ""
-  }
-
   const statusText = (() => {
     if (winner === "draw") return "Game over · Tie"
     if (winner === "X") return `Winner is ${players.sender.name}`
@@ -119,6 +108,7 @@ const TicTacToeCard: React.FC<Props> = ({
 
   const winnerSide = winner === "X" ? "sender" : winner === "O" ? "receiver" : null
   const winnerName = winner === "X" ? players.sender.name : winner === "O" ? players.receiver.name : null
+  const winFxKey = winnerSide ? `${winnerSide}-${normalizedBoard.join("")}` : ""
 
   return (
     <div
@@ -179,6 +169,10 @@ const TicTacToeCard: React.FC<Props> = ({
 
           <div
             style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "flex-end",
+              gap: 8,
               fontSize: 12,
               color: winner ? "#212529" : "#6c757d",
               fontWeight: 600,
@@ -187,6 +181,26 @@ const TicTacToeCard: React.FC<Props> = ({
             }}
           >
             {statusText}
+            {onDelete && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  void onDelete()
+                }}
+                className="btn btn-sm btn-outline-danger"
+                style={{
+                  padding: "2px 8px",
+                  lineHeight: 1.2,
+                  borderRadius: 999,
+                }}
+                aria-label="Delete game"
+                title="Delete game"
+              >
+                {"\u{1F5D1}"}{/* wastebasket */}
+              </button>
+            )}
           </div>
         </div>
 
@@ -230,7 +244,7 @@ const TicTacToeCard: React.FC<Props> = ({
           <div style={{ display: "flex", justifyContent: "center", gap: 10, marginTop: 6 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <div
-              key={winnerSide === "sender" ? `sender-${winFxNonce}` : "sender"}
+              key={winnerSide === "sender" ? `sender-${winFxKey}` : "sender"}
               style={{
                 width: 28,
                 height: 28,
@@ -318,7 +332,7 @@ const TicTacToeCard: React.FC<Props> = ({
 
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <div
-              key={winnerSide === "receiver" ? `receiver-${winFxNonce}` : "receiver"}
+              key={winnerSide === "receiver" ? `receiver-${winFxKey}` : "receiver"}
               style={{
                 width: 28,
                 height: 28,

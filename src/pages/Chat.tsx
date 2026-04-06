@@ -576,6 +576,20 @@ const Chat = () => {
     window.requestAnimationFrame(() => scrollToBottom("smooth"))
   }
 
+  const normalizeId = (v: string) => v.trim().replace(/[^\d+]/g, "")
+  const toDigits = (v: string) => v.replace(/\D/g, "")
+  const isSameUserId = (a: string, b: string) => {
+    if (a === b) return true
+    const an = normalizeId(a)
+    const bn = normalizeId(b)
+    if (an === bn) return true
+    const ad = toDigits(an)
+    const bd = toDigits(bn)
+    if (ad && bd && ad === bd) return true
+    if (ad.length >= 10 && bd.length >= 10 && ad.slice(-10) === bd.slice(-10)) return true
+    return false
+  }
+
   const emojis = useMemo(
     () => ["\u{1F600}", "\u{1F601}", "\u{1F602}", "\u{1F923}", "\u{1F60A}", "\u{1F60D}", "\u{1F618}", "\u{1F60E}", "\u{1F914}", "\u{1F622}", "\u{1F621}", "\u{1F44D}", "\u{1F44E}", "\u{1F64F}", "\u{1F44F}", "\u{1F389}", "\u2764\uFE0F", "\u{1F525}"],
     [],
@@ -651,6 +665,37 @@ const Chat = () => {
         if (exists) return prev.map((m) => (m._id === msg._id || ((msg as any).gameId && m._id === (msg as any).gameId) ? msg : m))
         return [...prev, msg]
       })
+
+      // Treat game updates as "new message" notifications for the other player.
+      const decoded = decodeGameMessage(msg.message ?? "")
+      if (decoded.kind === "game") {
+        const g = decoded.value
+        const isForMe =
+          isSameUserId(sender ?? "", g.players.sender.id) || isSameUserId(sender ?? "", g.players.receiver.id)
+        if (!isForMe) return
+      }
+
+      const other =
+        decoded.kind === "game"
+          ? isSameUserId(sender ?? "", decoded.value.players.sender.id)
+            ? decoded.value.players.receiver.id
+            : decoded.value.players.sender.id
+          : msg.sender
+
+      const isSelectedThread = isSameUserId(selectedUser?.phone ?? "", other)
+
+      if (!isSelectedThread || !isPageActive) {
+        setUnreadCounts((prev) => ({
+          ...prev,
+          [other]: (prev[other] ?? 0) + 1,
+        }))
+        window.dispatchEvent(new Event("unreadCountsChanged"))
+        return
+      }
+
+      setUnreadCounts((prev) => ({ ...prev, [other]: 0 }))
+      socketService.markSeen({ sender: other, receiver: sender })
+      window.dispatchEvent(new Event("unreadCountsChanged"))
     }
 
     socketService.onGameUpdated(handleGameUpdate)
@@ -1341,6 +1386,10 @@ const Chat = () => {
             const gameDecoded = decodeGameMessage(m.message ?? "")
             if (gameDecoded.kind === "game") {
               const g = gameDecoded.value
+              const canDeleteGame =
+                Boolean(sender) &&
+                (isSameUserId(sender ?? "", g.players.sender.id) ||
+                  isSameUserId(sender ?? "", g.players.receiver.id))
               return (
                 <div key={item.key} className="d-flex justify-content-center my-2">
                   <div
@@ -1354,6 +1403,23 @@ const Chat = () => {
                       players={{ sender: { id: g.players.sender.id, name: g.players.sender.name }, receiver: { id: g.players.receiver.id, name: g.players.receiver.name } }}
                       board={g.board}
                       currentTurn={g.currentTurn}
+                      onDelete={
+                        canDeleteGame
+                          ? async () => {
+                              const ok = window.confirm("Delete this Tic-Tac-Toe game?")
+                              if (!ok) return
+                              try {
+                                await deleteMessage(m._id)
+                                socketService.deleteMessage(m._id)
+                                setMessages((prev) =>
+                                  prev.filter((x) => x._id !== m._id && x._id !== g.gameId),
+                                )
+                              } catch (e) {
+                                console.error("Failed to delete game", e)
+                              }
+                            }
+                          : undefined
+                      }
                       onMove={(gameId, index) => {
                         // optimistic local update for responsiveness
                         const next: TicTacToePayloadV1 = {

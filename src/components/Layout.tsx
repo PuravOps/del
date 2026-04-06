@@ -3,6 +3,7 @@ import { Link, useLocation } from "react-router-dom";
 import { socketService } from "../services/socket";
 import { getUnseenCounts, ping } from "../services/api";
 import { clearFaviconBadge, setFaviconBadge } from "../utils/favicon";
+import { decodeGameMessage } from "../utils/gameMessage";
 import type { MessageResponse } from "../types/chat.types";
 import { usePageActivity } from "../utils/usePageActivity";
 
@@ -15,6 +16,7 @@ const Layout = ({ children }: Props) => {
   const userPhone = localStorage.getItem("userPhone") || "";
   const userName = localStorage.getItem("userName") || "";
   const [unreadTotal, setUnreadTotal] = useState(0);
+  const [gameNotifyTotal, setGameNotifyTotal] = useState(0);
   const [theme, setTheme] = useState<"dark" | "light">(() => {
     const stored = localStorage.getItem("theme");
     return stored === "light" ? "light" : "dark";
@@ -28,6 +30,46 @@ const Layout = ({ children }: Props) => {
   const isPageActive = usePageActivity();
   const [activeChatPhone, setActiveChatPhone] = useState<string | null>(null);
   const [isActiveChatThread, setIsActiveChatThread] = useState(false);
+
+  const normalizeId = (v: string) => v.trim().replace(/[^\d+]/g, "");
+  const toDigits = (v: string) => v.replace(/\D/g, "");
+  const isSameUserId = (a: string, b: string) => {
+    if (a === b) return true;
+    const an = normalizeId(a);
+    const bn = normalizeId(b);
+    if (an === bn) return true;
+    const ad = toDigits(an);
+    const bd = toDigits(bn);
+    if (ad && bd && ad === bd) return true;
+    if (ad.length >= 10 && bd.length >= 10 && ad.slice(-10) === bd.slice(-10))
+      return true;
+    return false;
+  };
+
+  const getOtherPartyForGameMessage = (msg: MessageResponse) => {
+    const decoded = decodeGameMessage(msg.message ?? "");
+    if (decoded.kind === "game") {
+      const g = decoded.value;
+      if (isSameUserId(userPhone, g.players.sender.id)) return g.players.receiver.id;
+      if (isSameUserId(userPhone, g.players.receiver.id)) return g.players.sender.id;
+    }
+    // fallback
+    if (!isSameUserId(userPhone, msg.sender)) return msg.sender;
+    return msg.receiver;
+  };
+
+  const isGameMessageForMe = (msg: MessageResponse) => {
+    const decoded = decodeGameMessage(msg.message ?? "");
+    if (decoded.kind === "game") {
+      const g = decoded.value;
+      return (
+        isSameUserId(userPhone, g.players.sender.id) ||
+        isSameUserId(userPhone, g.players.receiver.id)
+      );
+    }
+
+    return isSameUserId(userPhone, msg.sender) || isSameUserId(userPhone, msg.receiver);
+  };
 
   useEffect(() => {
     const handler = (e: Event) => {
@@ -115,6 +157,10 @@ const Layout = ({ children }: Props) => {
   }, [token, userPhone, refreshUnseenTotal]);
 
   useEffect(() => {
+    if (isPageActive && location.pathname === "/chat") setGameNotifyTotal(0);
+  }, [isPageActive, location.pathname]);
+
+  useEffect(() => {
     if (!token || !userPhone) return;
 
     const onReceive = (msg: MessageResponse) => {
@@ -139,8 +185,35 @@ const Layout = ({ children }: Props) => {
 
     socketService.onReceiveMessage(onReceive);
 
+    const onGame = (msg: MessageResponse) => {
+      if (!isGameMessageForMe(msg)) return;
+
+      const other = getOtherPartyForGameMessage(msg);
+
+      if (
+        isPageActive &&
+        location.pathname === "/chat" &&
+        isActiveChatThread &&
+        isSameUserId(activeChatPhone ?? "", other)
+      ) {
+        return;
+      }
+
+      setGameNotifyTotal((prev) => prev + 1);
+
+      const delayMs = isPageActive ? 350 : 0;
+      window.setTimeout(() => {
+        void refreshUnseenTotal();
+      }, delayMs);
+    };
+
+    socketService.onGameCreated(onGame);
+    socketService.onGameUpdated(onGame);
+
     return () => {
       socketService.offReceiveMessage(onReceive);
+      socketService.offGameCreated(onGame);
+      socketService.offGameUpdated(onGame);
     };
   }, [
     token,
@@ -167,13 +240,14 @@ const Layout = ({ children }: Props) => {
   }, [refreshUnseenTotal, isPageActive, location.pathname]);
 
   useEffect(() => {
-    if (unreadTotal > 0) {
-      void setFaviconBadge(unreadTotal);
+    const combined = unreadTotal + gameNotifyTotal;
+    if (combined > 0) {
+      void setFaviconBadge(combined);
       return;
     }
 
     clearFaviconBadge();
-  }, [unreadTotal]);
+  }, [unreadTotal, gameNotifyTotal]);
 
   const logout = () => {
     socketService.disconnect();
@@ -214,8 +288,10 @@ const Layout = ({ children }: Props) => {
             }`}
           >
             Chat{" "}
-            {unreadTotal > 0 && (
-              <span className="badge bg-danger ms-2">{unreadTotal > 99 ? "99+" : unreadTotal}</span>
+            {unreadTotal + gameNotifyTotal > 0 && (
+              <span className="badge bg-danger ms-2">
+                {unreadTotal + gameNotifyTotal > 99 ? "99+" : unreadTotal + gameNotifyTotal}
+              </span>
             )}
           </Link>
         </li>
