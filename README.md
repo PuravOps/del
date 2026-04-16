@@ -84,3 +84,7 @@ Backend (ChatGptAPI) must have Cloudinary env vars:
 - `CLOUDINARY_API_KEY`
 - `CLOUDINARY_API_SECRET`
 - `CLOUDINARY_FOLDER` (optional)
+
+## Emojis
+
+- Emoji picker now uses a full free emoji library (search + categories).

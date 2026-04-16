@@ -7,6 +7,8 @@ import { encodeGameMessage, decodeGameMessage, type TicTacToePayloadV1 } from ".
 import type { MessageResponse, SendMessagePayload, Reaction } from "../types/chat.types"
 import { usePageActivity } from "../utils/usePageActivity"
 import { uploadFileToApi } from "../utils/uploadApi"
+import EmojiPicker, { EmojiStyle, Theme, type EmojiClickData } from "emoji-picker-react"
+import { parse as parseTwemoji } from "twemoji-parser"
 import {
   decodeRichMessage,
   encodeRichMessage,
@@ -110,6 +112,10 @@ const Chat = () => {
   const [uploadError, setUploadError] = useState<string | null>(null)
   const [imagePreview, setImagePreview] = useState<{ url: string; title?: string } | null>(null)
   const [imagePreviewZoom, setImagePreviewZoom] = useState(1)
+  const emojiContainerRef = useRef<HTMLDivElement | null>(null)
+  const [pickerTheme, setPickerTheme] = useState<Theme>(() =>
+    document.documentElement.getAttribute("data-bs-theme") === "dark" ? Theme.DARK : Theme.LIGHT,
+  )
 
   const inputRef = useRef<HTMLTextAreaElement | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
@@ -208,6 +214,94 @@ const Chat = () => {
   }, [imagePreview])
 
   useEffect(() => {
+    if (!showEmojiPicker) return
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setShowEmojiPicker(false)
+    }
+    window.addEventListener("keydown", onKeyDown)
+    return () => window.removeEventListener("keydown", onKeyDown)
+  }, [showEmojiPicker])
+
+  useEffect(() => {
+    if (!showGifPicker) return
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setShowGifPicker(false)
+    }
+    window.addEventListener("keydown", onKeyDown)
+    return () => window.removeEventListener("keydown", onKeyDown)
+  }, [showGifPicker])
+
+  useEffect(() => {
+    const el = document.documentElement
+    const apply = () => {
+      const v = el.getAttribute("data-bs-theme")
+      setPickerTheme(v === "dark" ? Theme.DARK : Theme.LIGHT)
+    }
+    apply()
+
+    const mo = new MutationObserver(() => apply())
+    mo.observe(el, { attributes: true, attributeFilter: ["data-bs-theme"] })
+    return () => mo.disconnect()
+  }, [])
+
+  const renderEmojiText = useCallback((text: string) => {
+    if (!text) return null
+    const entities = parseTwemoji(text, { assetType: "svg" })
+    if (!entities.length) return text
+
+    const nodes: Array<React.ReactNode> = []
+    let last = 0
+    for (let i = 0; i < entities.length; i += 1) {
+      const e = entities[i]
+      const [start, end] = e.indices
+      if (start > last) nodes.push(text.slice(last, start))
+      nodes.push(
+        <img
+          key={`${e.text}-${start}-${end}`}
+          src={e.url}
+          alt={e.text}
+          className="sl-twemoji"
+          style={{ width: "1.1em", height: "1.1em", verticalAlign: "-0.18em" }}
+          draggable={false}
+          loading="lazy"
+        />,
+      )
+      last = end
+    }
+    if (last < text.length) nodes.push(text.slice(last))
+    return nodes
+  }, [])
+
+  const insertIntoInputAtCursor = useCallback(
+    (toInsert: string) => {
+      const el = inputRef.current
+      if (!el) {
+        setInput((prev) => `${prev}${toInsert}`)
+        return
+      }
+
+      const start = el.selectionStart ?? el.value.length
+      const end = el.selectionEnd ?? el.value.length
+      setInput((prev) => {
+        const before = prev.slice(0, start)
+        const after = prev.slice(end)
+        return `${before}${toInsert}${after}`
+      })
+
+      window.requestAnimationFrame(() => {
+        try {
+          const nextPos = start + toInsert.length
+          el.focus()
+          el.setSelectionRange(nextPos, nextPos)
+        } catch {
+          // ignore
+        }
+      })
+    },
+    [],
+  )
+
+  useEffect(() => {
     if (!messageMenu) return
 
     const onKeyDown = (e: KeyboardEvent) => {
@@ -246,8 +340,8 @@ const Chat = () => {
     (m: MessageResponse, isOutgoing: boolean, e: MouseEvent<HTMLDivElement>) => {
       e.preventDefault()
 
-      const MENU_W = 180
-      const MENU_H = 260
+      const MENU_W = 300
+      const MENU_H = 64
 
       let left = e.clientX
       left = Math.max(8, Math.min(left, window.innerWidth - MENU_W - 8))
@@ -275,37 +369,37 @@ const Chat = () => {
   useEffect(() => {
     if (!showGifPicker) return
 
-    const controller = new AbortController()
-    const run = async () => {
-      if (gifProvider === "none") {
-        setGifResults([])
-        setGifError(null)
-        setGifLoading(false)
-        setGifCursor(null)
-        return
-      }
+      const controller = new AbortController()
+      const run = async () => {
+        if (gifProvider === "none") {
+          setGifResults([])
+          setGifError(null)
+          setGifLoading(false)
+          setGifCursor(null)
+          return
+        }
 
-      const q = gifQuery.trim()
-      const limit = 32
+        const q = gifQuery.trim()
+        const limit = 32
 
       setGifLoading(true)
       setGifError(null)
       setGifCursor(null)
 
-      try {
-        const url = new URL(
-          gifProvider === "giphy"
-            ? q
-              ? "https://api.giphy.com/v1/gifs/search"
-              : "https://api.giphy.com/v1/gifs/trending"
-            : gifProvider === "klipy"
+        try {
+          const url = new URL(
+            gifProvider === "giphy"
               ? q
-                ? "https://api.klipy.com/v2/search"
-                : "https://api.klipy.com/v2/featured"
-              : q
-                ? "https://tenor.googleapis.com/v2/search"
-                : "https://tenor.googleapis.com/v2/featured",
-        )
+                ? "https://api.giphy.com/v1/gifs/search"
+                : "https://api.giphy.com/v1/gifs/trending"
+              : gifProvider === "klipy"
+                ? q
+                  ? "https://api.klipy.com/v2/search"
+                  : "https://api.klipy.com/v2/featured"
+                : q
+                  ? "https://tenor.googleapis.com/v2/search"
+                  : "https://tenor.googleapis.com/v2/featured",
+          )
 
         if (gifProvider === "giphy") {
           url.searchParams.set("api_key", String(giphyKey ?? ""))
@@ -424,7 +518,9 @@ const Chat = () => {
         if (gifCursor.provider !== "giphy") return
 
         const url = new URL(
-          q ? "https://api.giphy.com/v1/gifs/search" : "https://api.giphy.com/v1/gifs/trending",
+          q
+            ? "https://api.giphy.com/v1/gifs/search"
+            : "https://api.giphy.com/v1/gifs/trending",
         )
         url.searchParams.set("api_key", String(giphyKey ?? ""))
         url.searchParams.set("limit", String(limit))
@@ -615,11 +711,6 @@ const Chat = () => {
     if (ad.length >= 10 && bd.length >= 10 && ad.slice(-10) === bd.slice(-10)) return true
     return false
   }
-
-  const emojis = useMemo(
-    () => ["\u{1F600}", "\u{1F601}", "\u{1F602}", "\u{1F923}", "\u{1F60A}", "\u{1F60D}", "\u{1F618}", "\u{1F60E}", "\u{1F914}", "\u{1F622}", "\u{1F621}", "\u{1F44D}", "\u{1F44E}", "\u{1F64F}", "\u{1F44F}", "\u{1F389}", "\u2764\uFE0F", "\u{1F525}"],
-    [],
-  )
 
   useEffect(() => {
     if (!selectedUser) return
@@ -1359,7 +1450,7 @@ const Chat = () => {
   )
 
   return (
-    <div className="d-flex position-relative" style={{ height: "80vh", border: "1px solid #ddd" }}>
+    <div className="d-flex position-relative sl-chat">
       {imagePreview && (
         <>
           <div
@@ -1775,27 +1866,33 @@ const Chat = () => {
                     const looksLikeSingleGifUrl = isLikelyGifUrl(plain) && !/\s/.test(plain)
                     if (looksLikeSingleGifUrl) {
                       return (
-                        <img
-                          src={plain}
-                          alt="GIF"
-                          style={{ width: 220, height: "auto", borderRadius: 8 }}
-                          loading="lazy"
-                          role="button"
-                          tabIndex={0}
-                          onClick={() => setImagePreview({ url: plain, title: "GIF" })}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter" || e.key === " ") {
-                              e.preventDefault()
-                              setImagePreview({ url: plain, title: "GIF" })
-                            }
-                          }}
-                        />
+                        <span
+                          className={privacyMode ? "sl-privacy-media" : undefined}
+                          style={{ width: 220, borderRadius: 8 }}
+                        >
+                          <img
+                            src={plain}
+                            alt="GIF"
+                            style={{ width: 220, height: "auto", borderRadius: 8 }}
+                            loading="lazy"
+                            role="button"
+                            tabIndex={0}
+                            onClick={() => setImagePreview({ url: plain, title: "GIF" })}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter" || e.key === " ") {
+                                e.preventDefault()
+                                setImagePreview({ url: plain, title: "GIF" })
+                              }
+                            }}
+                          />
+                          {privacyMode && <span className="sl-privacy-mask" />}
+                        </span>
                       )
                     }
 
                 return (
                   <div style={{ whiteSpace: "pre-wrap" }}>
-                    {decoded.value}
+                    {renderEmojiText(decoded.value)}
                   </div>
                 )
               }
@@ -1862,25 +1959,31 @@ const Chat = () => {
                   {msg.type === "gif" ? (
                     <div>
                       {msg.gifUrl && (
-                        <img
-                          src={msg.gifUrl}
-                          alt="GIF"
-                          style={{ width: 220, height: "auto", borderRadius: 8 }}
-                          loading="lazy"
-                          role="button"
-                          tabIndex={0}
-                          onClick={() => setImagePreview({ url: msg.gifUrl!, title: "GIF" })}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter" || e.key === " ") {
-                              e.preventDefault()
-                              setImagePreview({ url: msg.gifUrl!, title: "GIF" })
-                            }
-                          }}
-                        />
+                        <span
+                          className={privacyMode ? "sl-privacy-media" : undefined}
+                          style={{ width: 220, borderRadius: 8 }}
+                        >
+                          <img
+                            src={msg.gifUrl}
+                            alt="GIF"
+                            style={{ width: 220, height: "auto", borderRadius: 8 }}
+                            loading="lazy"
+                            role="button"
+                            tabIndex={0}
+                            onClick={() => setImagePreview({ url: msg.gifUrl!, title: "GIF" })}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter" || e.key === " ") {
+                                e.preventDefault()
+                                setImagePreview({ url: msg.gifUrl!, title: "GIF" })
+                              }
+                            }}
+                          />
+                          {privacyMode && <span className="sl-privacy-mask" />}
+                        </span>
                       )}
                       {msg.text && (
                         <div style={{ whiteSpace: "pre-wrap" }} className="mt-2">
-                          {msg.text}
+                          {renderEmojiText(msg.text)}
                         </div>
                       )}
                     </div>
@@ -1893,7 +1996,7 @@ const Chat = () => {
                       const isVideo =
                         msg.mimeType?.startsWith("video/") ||
                         /\.(mp4|webm|ogg|mov|m4v|avi|mkv)$/i.test(url.toLowerCase())
-                      const linkClass = isOutgoing ? "link-light" : "link-primary"
+                      const linkClass = isOutgoing ? "sl-bubble-link-out" : "sl-bubble-link-in"
                       return (
                         <div>
                           {isImage ? (
@@ -1909,40 +2012,52 @@ const Chat = () => {
                                 display: "inline-flex",
                               }}
                             >
-                              <img
-                                src={url}
-                                alt={msg.fileName ?? "Image"}
-                                style={{ width: 220, height: "auto", borderRadius: 8 }}
-                                loading="lazy"
-                              />
+                              <span
+                                className={privacyMode ? "sl-privacy-media" : undefined}
+                                style={{ width: 220, borderRadius: 8 }}
+                              >
+                                <img
+                                  src={url}
+                                  alt={msg.fileName ?? "Image"}
+                                  style={{ width: 220, height: "auto", borderRadius: 8 }}
+                                  loading="lazy"
+                                />
+                                {privacyMode && <span className="sl-privacy-mask" />}
+                              </span>
                             </button>
                           ) : isVideo ? (
-                            <video
-                              src={url}
-                              controls
-                              style={{ width: 240, maxWidth: "100%", borderRadius: 8 }}
-                            />
+                            <span className={privacyMode ? "sl-privacy-media" : undefined} style={{ borderRadius: 8 }}>
+                              <video
+                                src={url}
+                                controls
+                                style={{ width: 240, maxWidth: "100%", borderRadius: 8 }}
+                              />
+                              {privacyMode && <span className="sl-privacy-mask" />}
+                            </span>
                           ) : (
-                            <a
-                              href={url}
-                              target="_blank"
-                              rel="noreferrer"
-                              className={linkClass}
-                              style={{ wordBreak: "break-word" }}
-                            >
-                              {msg.fileName ?? "Attachment"}
-                            </a>
+                            <span className={privacyMode ? "sl-privacy-media" : undefined} style={{ borderRadius: 8 }}>
+                              <a
+                                href={url}
+                                target="_blank"
+                                rel="noreferrer"
+                                className={linkClass}
+                                style={{ wordBreak: "break-word" }}
+                              >
+                                {msg.fileName ?? "Attachment"}
+                              </a>
+                              {privacyMode && <span className="sl-privacy-mask" />}
+                            </span>
                           )}
                           {msg.text && (
                             <div style={{ whiteSpace: "pre-wrap" }} className="mt-2">
-                              {msg.text}
+                              {renderEmojiText(msg.text)}
                             </div>
                           )}
                         </div>
                       )
                     })()
                   ) : (
-                    <div style={{ whiteSpace: "pre-wrap" }}>{msg.text ?? ""}</div>
+                    <div style={{ whiteSpace: "pre-wrap" }}>{renderEmojiText(msg.text ?? "")}</div>
                   )}
                 </div>
               )
@@ -1957,9 +2072,7 @@ const Chat = () => {
                 style={{ position: "relative" }}
               >
                 <div
-                  className={`p-2 rounded ${
-                    isOutgoing ? "bg-success text-white" : "bg-body border"
-                  }`}
+                  className={`p-2 sl-bubble ${isOutgoing ? "sl-bubble-out" : "sl-bubble-in"}`}
                   ref={(el) => {
                     messageElByIdRef.current[m._id] = el
                   }}
@@ -1990,8 +2103,8 @@ const Chat = () => {
                 >
                   {bubble}
                   <div
-                    className={`text-end small mt-1 ${
-                      isOutgoing ? "text-white-50" : "text-body-secondary"
+                    className={`text-end small mt-1 sl-bubble-meta ${
+                      isOutgoing ? "sl-bubble-meta-out" : "sl-bubble-meta-in"
                     }`}
                   >
                     {timeLabel}
@@ -2081,19 +2194,20 @@ const Chat = () => {
                       left: "50%",
                       transform: "translateX(-50%)",
                       zIndex: 1001,
-                      display: "flex",
-                      gap: "4px",
-                      flexWrap: "wrap",
-                      justifyContent: "center",
-                      maxWidth: "200px",
+                      width: 320,
+                      maxWidth: "75vw",
                     }}
                   >
-                    {emojis.map((emoji) => (
-                      <button
-                        key={emoji}
-                        type="button"
-                        className="btn btn-link p-0"
-                        onClick={async () => {
+                    <EmojiPicker
+                      height={340}
+                      width="100%"
+                      lazyLoadEmojis
+                      emojiStyle={EmojiStyle.TWITTER}
+                      searchPlaceHolder="Search emoji..."
+                      theme={pickerTheme}
+                      onEmojiClick={(emojiData: EmojiClickData) => {
+                        const emoji = emojiData.emoji
+                        void (async () => {
                           const myEmoji = getMyReactionEmoji(m, sender)
                           const isTogglingOff = myEmoji === emoji
                           applyReactionLocally(m._id, emoji, sender, !isTogglingOff)
@@ -2110,13 +2224,9 @@ const Chat = () => {
                           } finally {
                             setReactionPickerMessageId(null)
                           }
-                        }}
-                        style={{ fontSize: "20px", cursor: "pointer" }}
-                        title={`React with ${emoji}`}
-                      >
-                        {emoji}
-                      </button>
-                    ))}
+                        })()
+                      }}
+                    />
                   </div>
                 )}
               </div>
@@ -2138,7 +2248,7 @@ const Chat = () => {
                 top: messageMenu.top,
                 left: messageMenu.left,
                 zIndex: 2000,
-                minWidth: 150,
+                minWidth: 220,
               }}
               onClick={(e) => e.stopPropagation()}
             >
@@ -2155,84 +2265,97 @@ const Chat = () => {
                   (decoded.kind === "rich" &&
                     (decoded.value.type === "text" || decoded.value.type === "gif"))
                 const canManage = m.sender === sender
+                const isFileMsg = decoded.kind === "rich" && decoded.value.type === "file"
 
                 return (
                   <>
-                    <button
-                      type="button"
-                      className="btn btn-sm btn-light w-100 text-start"
-                      onClick={async () => {
-                        const text = getCopyTextForMessage(m.message)
-                        try {
-                          await navigator.clipboard.writeText(text)
-                        } catch (e) {
-                          console.error("Copy failed", e)
-                        } finally {
-                          setMessageMenu(null)
-                        }
-                      }}
-                    >
-                      Copy message
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-sm btn-light w-100 text-start mt-1"
-                      onClick={() => {
-                        setEditingMessageId(null)
-                        setEditBase(null)
-                        setEditError(null)
-                        setInput("")
-                        const preview = makeReplyPreview(m.message)
-                        setReplyTo({ id: m._id, sender: m.sender, ...preview })
-                        setMessageMenu(null)
-                        inputRef.current?.focus()
-                      }}
-                    >
-                      Reply
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-sm btn-light w-100 text-start mt-1"
-                      onClick={() => {
-                        setReactionPickerMessageId(m._id)
-                        setMessageMenu(null)
-                      }}
-                    >
-                      {"\u{1F60A}"} React
-                    </button>
-
-                    {canManage && canEdit && (
+                    <div className="d-flex align-items-center gap-1 sl-msg-menu-row">
                       <button
                         type="button"
-                        className="btn btn-sm btn-light w-100 text-start mt-1"
+                        className="btn btn-sm sl-menu-icon-btn"
+                        title="React"
+                        aria-label="React"
                         onClick={() => {
-                          setReplyTo(null)
-                          setSelectedGifUrl(null)
-                          setShowEmojiPicker(false)
-                          setShowGifPicker(false)
+                          setReactionPickerMessageId(m._id)
+                          setMessageMenu(null)
+                        }}
+                      >
+                        {"\u263A\uFE0F"}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-sm sl-menu-icon-btn"
+                        title="Copy message"
+                        aria-label="Copy message"
+                        onClick={async () => {
+                          const text = getCopyTextForMessage(m.message)
+                          try {
+                            await navigator.clipboard.writeText(text)
+                          } catch (e) {
+                            console.error("Copy failed", e)
+                          } finally {
+                            setMessageMenu(null)
+                          }
+                        }}
+                      >
+                        {"\u29C9"}
+                      </button>
 
-                          setEditingMessageId(m._id)
-                          setEditBase(
-                            decoded.kind === "plain"
-                              ? { kind: "plain", value: decoded.value }
-                              : { kind: "rich", value: decoded.value },
-                          )
-                          setInput(
-                            decoded.kind === "plain" ? decoded.value : decoded.value.text ?? "",
-                          )
+                      {canManage && canEdit && (
+                        <button
+                          type="button"
+                          className="btn btn-sm sl-menu-icon-btn"
+                          title="Edit message"
+                          aria-label="Edit message"
+                          onClick={() => {
+                            setReplyTo(null)
+                            setSelectedGifUrl(null)
+                            setShowEmojiPicker(false)
+                            setShowGifPicker(false)
+
+                            setEditingMessageId(m._id)
+                            setEditBase(
+                              decoded.kind === "plain"
+                                ? { kind: "plain", value: decoded.value }
+                                : { kind: "rich", value: decoded.value },
+                            )
+                            setInput(
+                              decoded.kind === "plain" ? decoded.value : decoded.value.text ?? "",
+                            )
+                            setEditError(null)
+                            setMessageMenu(null)
+                            inputRef.current?.focus()
+                          }}
+                        >
+                          {"\u270E"}
+                        </button>
+                      )}
+
+                      <button
+                        type="button"
+                        className="btn btn-sm sl-menu-icon-btn"
+                        title="Reply"
+                        aria-label="Reply"
+                        onClick={() => {
+                          setEditingMessageId(null)
+                          setEditBase(null)
                           setEditError(null)
+                          setInput("")
+                          const preview = makeReplyPreview(m.message)
+                          setReplyTo({ id: m._id, sender: m.sender, ...preview })
                           setMessageMenu(null)
                           inputRef.current?.focus()
                         }}
                       >
-                        Edit Message
+                        {"\u21A9\uFE0E"}
                       </button>
-                    )}
 
                     {canManage && (
                       <button
                         type="button"
-                        className="btn btn-sm btn-light w-100 text-start mt-1"
+                        className="btn btn-sm sl-menu-icon-btn"
+                        title={isFileMsg ? "Delete file" : "Delete message"}
+                        aria-label="Delete"
                         onClick={async () => {
                           try {
                             await deleteMessage(messageMenu.messageId)
@@ -2246,14 +2369,10 @@ const Chat = () => {
                           }
                         }}
                       >
-                        {(() => {
-                          const mm = messages.find((x) => x._id === messageMenu.messageId)
-                          const d = mm ? decodeRichMessage(mm.message) : null
-                          if (d && d.kind === "rich" && d.value.type === "file") return "Delete File"
-                          return "Delete Message"
-                        })()}
+                        {"\u{1F5D1}\uFE0E"}
                       </button>
                     )}
+                    </div>
                   </>
                 )
               })()}
@@ -2263,7 +2382,7 @@ const Chat = () => {
 
         {/* Input */}
         {selectedUser && (
-          <div className="p-3 border-top">
+          <div className="p-3 border-top" style={{ position: "relative" }}>
             {sendError && (
               <div className="alert alert-warning py-2 mb-2">{sendError}</div>
             )}
@@ -2370,12 +2489,15 @@ const Chat = () => {
             {!editingMessageId && selectedGifUrl && (
               <div className="border rounded bg-body p-2 mb-2 d-flex align-items-start justify-content-between gap-2">
                 <div className="d-flex align-items-center gap-2" style={{ minWidth: 0 }}>
-                  <img
-                    src={selectedGifUrl}
-                    alt="Selected GIF"
-                    style={{ width: 48, height: 48, objectFit: "cover", borderRadius: 8 }}
-                    loading="lazy"
-                  />
+                  <span className={privacyMode ? "sl-privacy-media" : undefined} style={{ borderRadius: 8 }}>
+                    <img
+                      src={selectedGifUrl}
+                      alt="Selected GIF"
+                      style={{ width: 48, height: 48, objectFit: "cover", borderRadius: 8 }}
+                      loading="lazy"
+                    />
+                    {privacyMode && <span className="sl-privacy-mask" />}
+                  </span>
                   <div className="small text-truncate">GIF selected</div>
                 </div>
                 <button
@@ -2389,29 +2511,144 @@ const Chat = () => {
                 </button>
               </div>
             )}
+            <div className="d-flex align-items-center">
+              <input
+                ref={fileInputRef}
+                type="file"
+                className="d-none"
+                accept="image/*,video/*,application/pdf"
+                multiple
+                onChange={onFileInputChange}
+              />
+              <button
+                type="button"
+                className="btn btn-outline-secondary me-2"
+                onClick={() => {
+                  setShowEmojiPicker((v) => !v)
+                  setShowGifPicker(false)
+                }}
+                aria-label="Toggle emoji picker"
+                title="Emojis"
+              >
+                {"\u{1F60A}"}
+              </button>
+              <textarea
+                ref={inputRef}
+                className="form-control"
+                rows={3}
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onPaste={onPasteUpload}
+                onKeyDown={(e) => {
+                  if (e.key !== "Enter") return
+                  if (e.nativeEvent.isComposing) return
+                  if (e.shiftKey) {
+                    // allow newline insertion
+                    return
+                  }
+                  e.preventDefault()
+                  void sendMessage()
+                }}
+                onKeyUp={(e) => {
+                  if (e.key === "Escape" && editingMessageId) {
+                    setEditingMessageId(null)
+                    setEditBase(null)
+                    setEditError(null)
+                    setInput("")
+                  }
+                }}
+                placeholder={
+                  editingMessageId
+                    ? "Edit message..."
+                    : selectedGifUrl
+                      ? "Add a caption (optional)..."
+                      : "Type a message..."
+                }
+              />
+              <button
+                type="button"
+                className="btn btn-outline-secondary ms-2"
+                onClick={() => {
+                  if (editingMessageId) return
+                  setShowGifPicker((v) => !v)
+                  setShowEmojiPicker(false)
+                }}
+                aria-label="Toggle GIF picker"
+                title="GIF"
+                disabled={Boolean(editingMessageId)}
+              >
+                GIF
+              </button>
+              <button
+                type="button"
+                className="btn btn-outline-secondary ms-2"
+                onClick={onPickFiles}
+                aria-label="Upload file"
+                title="Upload file"
+                disabled={Boolean(editingMessageId)}
+              >
+                {"\u{1F4CE}"}
+              </button>
+              <button className="btn btn-success ms-2" onClick={sendMessage}>
+                {editingMessageId ? "Update" : "Send"}
+              </button>
+            </div>
+
+            {/[\\uD83C\\uD83D\\uD83E]/.test(input) && (
+              <div
+                className="small text-body-secondary mt-1"
+                title="Emoji preview (for flags)"
+                onClick={() => inputRef.current?.focus()}
+                style={{ cursor: "text" }}
+              >
+                {renderEmojiText(input)}
+              </div>
+            )}
+
+            {/* Panels below composer */}
             {showEmojiPicker && (
-              <div className="border rounded bg-body p-2 mb-2">
-                <div className="d-flex flex-wrap gap-2">
-                  {emojis.map((emoji) => (
-                    <button
-                      key={emoji}
-                      type="button"
-                      className="btn btn-outline-secondary btn-sm"
-                      onClick={() => {
-                        setInput((prev) => `${prev}${emoji}`)
-                        inputRef.current?.focus()
-                      }}
-                      aria-label={`Insert ${emoji}`}
-                    >
-                      {emoji}
-                    </button>
-                  ))}
+              <div ref={emojiContainerRef} className="border rounded shadow-sm bg-body p-2 mt-2" style={{ width: "100%" }}>
+                <div className="d-flex align-items-center justify-content-between mb-2">
+                  <div className="small fw-semibold text-body-secondary">Emojis</div>
+                  <button
+                    type="button"
+                    className="btn btn-outline-secondary btn-sm"
+                    onClick={() => setShowEmojiPicker(false)}
+                    aria-label="Close emoji picker"
+                    title="Close"
+                  >
+                    {"\u2715"}
+                  </button>
                 </div>
+                <EmojiPicker
+                  height={isMobileLayout ? 300 : 360}
+                  width="100%"
+                  lazyLoadEmojis
+                  emojiStyle={EmojiStyle.TWITTER}
+                  searchPlaceHolder="Search emoji..."
+                  theme={pickerTheme}
+                  onEmojiClick={(emojiData: EmojiClickData) => {
+                    insertIntoInputAtCursor(emojiData.emoji)
+                  }}
+                />
               </div>
             )}
 
             {!editingMessageId && showGifPicker && (
-              <div className="border rounded bg-body p-2 mb-2">
+              <div className="border rounded shadow-sm bg-body p-2 mt-2" style={{ width: "100%" }}>
+                <div className="d-flex align-items-center justify-content-between mb-2">
+                  <div className="small fw-semibold text-body-secondary">GIFs</div>
+                  <button
+                    type="button"
+                    className="btn btn-outline-secondary btn-sm"
+                    onClick={() => setShowGifPicker(false)}
+                    aria-label="Close GIF picker"
+                    title="Close"
+                  >
+                    {"\u2715"}
+                  </button>
+                </div>
+
                 <div className="d-flex gap-2 mb-2">
                   <input
                     className="form-control"
@@ -2450,33 +2687,27 @@ const Chat = () => {
                 {!gifLoading && !gifError && gifQuery.trim().length === 0 && (
                   <div className="text-body-secondary small mb-2">Trending</div>
                 )}
-                {gifProvider === "giphy" && (
-                  <div className="text-body-secondary small mb-2">Powered by GIPHY</div>
-                )}
-                {gifProvider === "klipy" && (
-                  <div className="text-body-secondary small mb-2">Powered by KLIPY</div>
-                )}
 
                 {gifResults.length > 0 && (
                   <div
                     className="d-grid gap-2"
-                  style={{
-                    gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
-                    maxHeight: 320,
-                    overflowY: "auto",
-                  }}
-                  ref={gifResultsContainerRef}
-                  onScroll={() => {
-                    const el = gifResultsContainerRef.current
-                    if (!el) return
-                    const remaining = el.scrollHeight - (el.scrollTop + el.clientHeight)
-                    if (remaining < 240) void loadMoreGifs()
-                  }}
-                >
-                  {gifResults.map((g) => (
-                    <button
-                      key={g.url}
-                      type="button"
+                    style={{
+                      gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+                      maxHeight: 240,
+                      overflowY: "auto",
+                    }}
+                    ref={gifResultsContainerRef}
+                    onScroll={() => {
+                      const el = gifResultsContainerRef.current
+                      if (!el) return
+                      const remaining = el.scrollHeight - (el.scrollTop + el.clientHeight)
+                      if (remaining < 240) void loadMoreGifs()
+                    }}
+                  >
+                    {gifResults.map((g) => (
+                      <button
+                        key={g.url}
+                        type="button"
                         className="btn btn-light p-1 border"
                         onClick={() => {
                           setSelectedGifUrl(g.url)
@@ -2487,20 +2718,20 @@ const Chat = () => {
                         title="Select GIF"
                         aria-label="Select GIF"
                       >
-                        <img
-                          src={g.previewUrl ?? g.url}
-                          alt="GIF option"
-                          style={{ width: "100%", height: 80, objectFit: "cover", borderRadius: 6 }}
-                          loading="lazy"
-                        />
+                        <span
+                          className={privacyMode ? "sl-privacy-media" : undefined}
+                          style={{ width: "100%", borderRadius: 6 }}
+                        >
+                          <img
+                            src={g.previewUrl ?? g.url}
+                            alt="GIF option"
+                            style={{ width: "100%", height: 72, objectFit: "cover", borderRadius: 6 }}
+                            loading="lazy"
+                          />
+                          {privacyMode && <span className="sl-privacy-mask" />}
+                        </span>
                       </button>
                     ))}
-                  </div>
-                )}
-
-                {gifProvider === "none" && (
-                  <div className="text-body-secondary small mt-2">
-                    Tip: add `VITE_KLIPY_API_KEY` (or `VITE_GIPHY_API_KEY` / `VITE_TENOR_API_KEY`) to enable GIF search.
                   </div>
                 )}
 
@@ -2509,89 +2740,6 @@ const Chat = () => {
                 )}
               </div>
             )}
-
-            <div className="d-flex align-items-center">
-              <input
-                ref={fileInputRef}
-                type="file"
-                className="d-none"
-                accept="image/*,video/*,application/pdf"
-                multiple
-                onChange={onFileInputChange}
-              />
-              <button
-                type="button"
-                className="btn btn-outline-secondary me-2"
-                onClick={() => {
-                  setShowEmojiPicker((v) => !v)
-                  setShowGifPicker(false)
-                }}
-                aria-label="Toggle emoji picker"
-                title="Emojis"
-              >
-                {"\u{1F60A}"}
-              </button>
-              <button
-                type="button"
-                className="btn btn-outline-secondary me-2"
-                onClick={() => {
-                  if (editingMessageId) return
-                  setShowGifPicker((v) => !v)
-                  setShowEmojiPicker(false)
-                }}
-                aria-label="Toggle GIF picker"
-                title="GIF"
-                disabled={Boolean(editingMessageId)}
-              >
-                GIF
-              </button>
-              <button
-                type="button"
-                className="btn btn-outline-secondary me-2"
-                onClick={onPickFiles}
-                aria-label="Upload file"
-                title="Upload image/PDF"
-                disabled={Boolean(editingMessageId)}
-              >
-                {"\u{1F4CE}"}
-              </button>
-              <textarea
-                ref={inputRef}
-                className="form-control me-2"
-                rows={3}
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onPaste={onPasteUpload}
-                onKeyDown={(e) => {
-                  if (e.key !== "Enter") return
-                  if (e.nativeEvent.isComposing) return
-                  if (e.shiftKey) {
-                    // allow newline insertion
-                    return
-                  }
-                  e.preventDefault()
-                  void sendMessage()
-                }}
-                onKeyUp={(e) => {
-                  if (e.key === "Escape" && editingMessageId) {
-                    setEditingMessageId(null)
-                    setEditBase(null)
-                    setEditError(null)
-                    setInput("")
-                  }
-                }}
-                placeholder={
-                  editingMessageId
-                    ? "Edit message..."
-                    : selectedGifUrl
-                      ? "Add a caption (optional)..."
-                      : "Type a message..."
-                }
-              />
-              <button className="btn btn-success" onClick={sendMessage}>
-                {editingMessageId ? "Update" : "Send"}
-              </button>
-            </div>
           </div>
         )}
       </div>
