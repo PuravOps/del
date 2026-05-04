@@ -1,5 +1,6 @@
 import { io, Socket } from "socket.io-client"
 import { SendMessagePayload, MessageResponse } from "../types/chat.types"
+import type { PresenceStatus } from "../types/user.types"
 
 export interface MessagesSeenPayload {
   sender: string
@@ -20,6 +21,18 @@ export interface ReactionPayload {
 
 export interface MessageUpdatedPayload {
   message: MessageResponse
+}
+
+export interface PresenceUpdatePayload {
+  userPhone: string
+  status: PresenceStatus
+  lastActiveAt?: string | null
+}
+
+export interface TypingUpdatePayload {
+  userPhone: string
+  targetUserPhone: string
+  isTyping: boolean
 }
 
 class SocketService {
@@ -60,8 +73,8 @@ class SocketService {
   connect(userId: string) {
     if (!this.socket.connected) {
       this.socket.connect()
-      this.socket.emit("join", userId)
     }
+    this.socket.emit("join", userId)
   }
 
   disconnect() {
@@ -96,6 +109,22 @@ class SocketService {
 
   removeReaction(messageId: string, emoji: string, userPhone: string) {
     this.socket.emit("removeReaction", { messageId, emoji, userPhone })
+  }
+
+  heartbeat(payload: { userPhone: string; activeThreadPhone?: string | null; isChatActive?: boolean }) {
+    this.socket.emit("presence:heartbeat", payload)
+  }
+
+  setActiveThread(payload: { userPhone: string; activeThreadPhone?: string | null; isChatActive?: boolean }) {
+    this.socket.emit("presence:thread", payload)
+  }
+
+  startTyping(payload: { userPhone: string; targetUserPhone: string }) {
+    this.socket.emit("typing:start", payload)
+  }
+
+  stopTyping(payload: { userPhone: string; targetUserPhone: string }) {
+    this.socket.emit("typing:stop", payload)
   }
 
   // Game-specific helpers
@@ -194,6 +223,22 @@ class SocketService {
 
   offGameUpdated(callback?: (msg: MessageResponse) => void) {
     this.socket.off("game.updated", callback as any)
+  }
+
+  onPresenceUpdate(callback: (payload: PresenceUpdatePayload) => void) {
+    this.socket.on("presence:update", callback)
+  }
+
+  offPresenceUpdate(callback?: (payload: PresenceUpdatePayload) => void) {
+    this.socket.off("presence:update", callback as any)
+  }
+
+  onTypingUpdate(callback: (payload: TypingUpdatePayload) => void) {
+    this.socket.on("typing:update", callback)
+  }
+
+  offTypingUpdate(callback?: (payload: TypingUpdatePayload) => void) {
+    this.socket.off("typing:update", callback as any)
   }
 }
 

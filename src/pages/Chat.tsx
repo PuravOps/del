@@ -1,10 +1,28 @@
 ﻿import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react"
 import type { ClipboardEvent, ChangeEvent } from "react"
-import { getMessages, getUnseenCounts, getUsers, deleteMessage, updateMessage, addReaction, removeReaction } from "../services/api"
+import {
+  getMessages,
+  getUnseenCounts,
+  getUsers,
+  deleteMessage,
+  updateMessage,
+  addReaction,
+  removeReaction,
+  getUserPresence,
+  getChatMedia,
+  getChatFiles,
+  getChatLinks,
+  setMessageStarred,
+  getChatStarredMessages,
+} from "../services/api"
 import { socketService } from "./ChatService"
 import TicTacToeCard from "../components/TicTacToeCard"
 import { encodeGameMessage, decodeGameMessage, type TicTacToePayloadV1 } from "../utils/gameMessage"
-import type { MessageResponse, SendMessagePayload, Reaction } from "../types/chat.types"
+import type {
+  MessageResponse,
+  SendMessagePayload,
+  SharedContentCollection,
+} from "../types/chat.types"
 import { usePageActivity } from "../utils/usePageActivity"
 import { uploadFileToApi } from "../utils/uploadApi"
 import EmojiPicker, { EmojiStyle, Theme, type EmojiClickData } from "emoji-picker-react"
@@ -16,14 +34,14 @@ import {
   type RichChatMessageV1,
   type RichReplyToV1,
 } from "../utils/richChatMessage"
-
-interface User {
-  _id: string
-  name: string
-  phone: string
-}
+import { extractSharedContent, isGifUrl } from "../utils/chatSharedContent"
+import type { User, UserPresenceResponse } from "../types/user.types"
+import type { PresenceUpdatePayload, TypingUpdatePayload } from "../services/socket"
 
 const PAGE_SIZE = 30
+const TYPING_STOP_DELAY_MS = 1200
+const EMPTY_SHARED_CONTENT: SharedContentCollection = { media: [], files: [], links: [] }
+const STARRED_STORAGE_PREFIX = "sl-starred-messages:"
 
 const formatTimeLabel = (iso: string) => {
   const d = new Date(iso)
@@ -53,6 +71,66 @@ const formatDateLabel = (iso: string) => {
     day: "2-digit",
   }).format(d)
 }
+
+const formatLastSeenLabel = (iso: string | null | undefined) => {
+  if (!iso) return "Offline"
+
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return "Offline"
+
+  const now = new Date()
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  const startOfThatDay = new Date(date.getFullYear(), date.getMonth(), date.getDate())
+  const diffDays = Math.round(
+    (startOfToday.getTime() - startOfThatDay.getTime()) / (24 * 60 * 60 * 1000),
+  )
+
+  const time = formatTimeLabel(iso)
+  if (diffDays === 0) return `Last seen today at ${time}`
+  if (diffDays === 1) return `Last seen yesterday at ${time}`
+  return `Last seen ${formatDateLabel(iso)} at ${time}`
+}
+
+const formatFileSize = (bytes?: number) => {
+  if (!bytes || bytes <= 0) return null
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`
+}
+
+const mergeSharedCollections = (
+  primary: SharedContentCollection,
+  fallback: SharedContentCollection,
+): SharedContentCollection => {
+  const media = new Map<string, SharedContentCollection["media"][number]>()
+  const files = new Map<string, SharedContentCollection["files"][number]>()
+  const links = new Map<string, SharedContentCollection["links"][number]>()
+
+  for (const item of [...primary.media, ...fallback.media]) {
+    media.set(`${item.messageId}:${item.url}`, item)
+  }
+  for (const item of [...primary.files, ...fallback.files]) {
+    files.set(`${item.messageId}:${item.url}`, item)
+  }
+  for (const item of [...primary.links, ...fallback.links]) {
+    links.set(`${item.messageId}:${item.url}`, item)
+  }
+
+  return {
+    media: [...media.values()].sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+    ),
+    files: [...files.values()].sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+    ),
+    links: [...links.values()].sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+    ),
+  }
+}
+
+const extractUrlsFromText = (value: string) => value.match(/https?:\/\/[^\s<>"'`]+/gi) ?? []
 
 const Chat = () => {
   const [users, setUsers] = useState<User[]>([])
@@ -112,6 +190,17 @@ const Chat = () => {
   const [uploadError, setUploadError] = useState<string | null>(null)
   const [imagePreview, setImagePreview] = useState<{ url: string; title?: string } | null>(null)
   const [imagePreviewZoom, setImagePreviewZoom] = useState(1)
+  const [isSharedPanelOpen, setIsSharedPanelOpen] = useState(false)
+  const [sharedPanelTab, setSharedPanelTab] = useState<"media" | "files" | "links">("media")
+  const [sharedContent, setSharedContent] = useState<SharedContentCollection>(EMPTY_SHARED_CONTENT)
+  const [sharedContentLoading, setSharedContentLoading] = useState(false)
+  const [sharedContentNotice, setSharedContentNotice] = useState<string | null>(null)
+  const [isStarredPanelOpen, setIsStarredPanelOpen] = useState(false)
+  const [starredMessageIds, setStarredMessageIds] = useState<string[]>([])
+  const [starredMessages, setStarredMessages] = useState<MessageResponse[]>([])
+  const [starredMessagesLoading, setStarredMessagesLoading] = useState(false)
+  const [starredMessagesNotice, setStarredMessagesNotice] = useState<string | null>(null)
+  const [selectedUserPresence, setSelectedUserPresence] = useState<UserPresenceResponse | null>(null)
   const emojiContainerRef = useRef<HTMLDivElement | null>(null)
   const [pickerTheme, setPickerTheme] = useState<Theme>(() =>
     document.documentElement.getAttribute("data-bs-theme") === "dark" ? Theme.DARK : Theme.LIGHT,
@@ -126,6 +215,9 @@ const Chat = () => {
   const messageElByIdRef = useRef<Record<string, HTMLDivElement | null>>({})
   const highlightTimerRef = useRef<number | null>(null)
   const gifResultsContainerRef = useRef<HTMLDivElement | null>(null)
+  const typingStopTimerRef = useRef<number | null>(null)
+  const typingActiveTargetRef = useRef<string | null>(null)
+  const lastHeartbeatAtRef = useRef(0)
 
   const sender = localStorage.getItem("userPhone") || ""
   const isPageActive = usePageActivity()
@@ -139,6 +231,71 @@ const Chat = () => {
       : tenorKey
         ? "tenor"
         : "none"
+
+  const emitPresenceHeartbeat = useCallback(
+    (activeThreadPhone?: string | null) => {
+      if (!sender) return
+      if (!isPageActive) return
+
+      const now = Date.now()
+      if (now - lastHeartbeatAtRef.current < 4000) return
+
+      lastHeartbeatAtRef.current = now
+      socketService.heartbeat({
+        userPhone: sender,
+        activeThreadPhone: activeThreadPhone ?? selectedUser?.phone ?? null,
+        isChatActive: true,
+      })
+    },
+    [isPageActive, selectedUser?.phone, sender],
+  )
+
+  const stopTypingIndicator = useCallback(
+    (targetUserPhone?: string | null) => {
+      const target = targetUserPhone ?? typingActiveTargetRef.current
+      if (!sender || !target) return
+
+      socketService.stopTyping({ userPhone: sender, targetUserPhone: target })
+      typingActiveTargetRef.current = null
+      if (typingStopTimerRef.current) {
+        window.clearTimeout(typingStopTimerRef.current)
+        typingStopTimerRef.current = null
+      }
+    },
+    [sender],
+  )
+
+  const scheduleTypingStop = useCallback(
+    (targetUserPhone: string) => {
+      if (typingStopTimerRef.current) window.clearTimeout(typingStopTimerRef.current)
+      typingStopTimerRef.current = window.setTimeout(() => {
+        stopTypingIndicator(targetUserPhone)
+      }, TYPING_STOP_DELAY_MS)
+    },
+    [stopTypingIndicator],
+  )
+
+  const startTypingIndicator = useCallback(
+    (targetUserPhone: string) => {
+      if (!sender || !targetUserPhone) return
+      if (typingActiveTargetRef.current !== targetUserPhone) {
+        socketService.startTyping({ userPhone: sender, targetUserPhone })
+      }
+      typingActiveTargetRef.current = targetUserPhone
+      scheduleTypingStop(targetUserPhone)
+    },
+    [scheduleTypingStop, sender],
+  )
+
+  const presenceLabel = useMemo(() => {
+    if (!selectedUserPresence) return ""
+    if (selectedUserPresence.isTyping) return "Typing..."
+    if (selectedUserPresence.status === "online") return "Online"
+    if (selectedUserPresence.status === "away") {
+      return formatLastSeenLabel(selectedUserPresence.lastActiveAt)
+    }
+    return formatLastSeenLabel(selectedUserPresence.lastActiveAt)
+  }, [selectedUserPresence])
 
   useEffect(() => {
     messagesRef.current = messages
@@ -178,6 +335,90 @@ const Chat = () => {
     }
   }, [selectedUser?.phone, isPageActive])
 
+  useEffect(() => {
+    if (!sender) return
+
+    const activeThreadPhone = isPageActive ? selectedUser?.phone ?? null : null
+    socketService.setActiveThread({
+      userPhone: sender,
+      activeThreadPhone,
+      isChatActive: isPageActive,
+    })
+    emitPresenceHeartbeat(activeThreadPhone)
+
+    if (!activeThreadPhone) {
+      stopTypingIndicator()
+    }
+  }, [emitPresenceHeartbeat, isPageActive, selectedUser?.phone, sender, stopTypingIndicator])
+
+  useEffect(() => {
+    if (!selectedUser || !sender) {
+      setSelectedUserPresence(null)
+      return
+    }
+
+    let cancelled = false
+
+    const loadPresence = async () => {
+      try {
+        const res = await getUserPresence(selectedUser.phone, sender)
+        if (cancelled) return
+        setSelectedUserPresence(res.data)
+      } catch (e) {
+        if (!cancelled) {
+          console.error("Failed to load user presence", e)
+          setSelectedUserPresence({
+            phone: selectedUser.phone,
+            status: "offline",
+            lastActiveAt: selectedUser.lastActiveAt ?? null,
+            isTyping: false,
+          })
+        }
+      }
+    }
+
+    void loadPresence()
+
+    return () => {
+      cancelled = true
+    }
+  }, [selectedUser, sender])
+
+  useEffect(() => {
+    if (!sender) return
+
+    const handlePresenceUpdate = (payload: PresenceUpdatePayload) => {
+      if (payload.userPhone !== selectedUser?.phone) return
+
+      setSelectedUserPresence((prev) => ({
+        phone: payload.userPhone,
+        status: payload.status,
+        lastActiveAt: payload.lastActiveAt ?? prev?.lastActiveAt ?? null,
+        isTyping: prev?.isTyping ?? false,
+      }))
+    }
+
+    const handleTypingUpdate = (payload: TypingUpdatePayload) => {
+      if (payload.userPhone !== selectedUser?.phone) return
+      if (payload.targetUserPhone !== sender) return
+
+      setSelectedUserPresence((prev) => ({
+        phone: payload.userPhone,
+        status: prev?.status ?? "offline",
+        lastActiveAt: prev?.lastActiveAt ?? null,
+        isTyping: payload.isTyping,
+      }))
+    }
+
+    socketService.onPresenceUpdate(handlePresenceUpdate)
+    socketService.onTypingUpdate(handleTypingUpdate)
+
+    return () => {
+      socketService.offPresenceUpdate(handlePresenceUpdate)
+      socketService.offTypingUpdate(handleTypingUpdate)
+    }
+  }, [selectedUser?.phone, sender])
+
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
     window.requestAnimationFrame(() => {
       messagesEndRef.current?.scrollIntoView({ behavior })
@@ -200,6 +441,7 @@ const Chat = () => {
   useEffect(() => {
     return () => {
       if (highlightTimerRef.current) window.clearTimeout(highlightTimerRef.current)
+      if (typingStopTimerRef.current) window.clearTimeout(typingStopTimerRef.current)
     }
   }, [])
 
@@ -337,8 +579,9 @@ const Chat = () => {
   )
 
   const openMessageMenu = useCallback(
-    (m: MessageResponse, isOutgoing: boolean, e: MouseEvent<HTMLDivElement>) => {
+    (m: MessageResponse, isOutgoing: boolean, e: MouseEvent<HTMLElement>) => {
       e.preventDefault()
+      e.stopPropagation()
 
       const MENU_W = 300
       const MENU_H = 64
@@ -356,15 +599,13 @@ const Chat = () => {
     [],
   )
 
-  const isLikelyGifUrl = useCallback((value: string) => {
-    const v = value.trim().toLowerCase()
-    if (!v) return false
-    if (!/^https?:\/\//.test(v)) return false
-    if (v.endsWith(".gif")) return true
-    if (v.includes("giphy.com/")) return true
-    if (v.includes("tenor.com/")) return true
-    return false
-  }, [])
+  const handleMessageSecondaryClick = useCallback(
+    (m: MessageResponse, isOutgoing: boolean, e: MouseEvent<HTMLElement>) => {
+      if (e.button !== 2) return
+      openMessageMenu(m, isOutgoing, e)
+    },
+    [openMessageMenu],
+  )
 
   useEffect(() => {
     if (!showGifPicker) return
@@ -647,6 +888,18 @@ const Chat = () => {
     return next
   }, [messages, selectedUser, sender])
 
+  const starredStorageKey = useMemo(
+    () => (sender ? `${STARRED_STORAGE_PREFIX}${sender}` : null),
+    [sender],
+  )
+
+  const starredIdSet = useMemo(() => new Set(starredMessageIds), [starredMessageIds])
+
+  const derivedSharedContent = useMemo(
+    () => extractSharedContent(filteredMessages),
+    [filteredMessages],
+  )
+
   const lastOutgoingMessageId = useMemo(() => {
     for (let i = filteredMessages.length - 1; i >= 0; i -= 1) {
       const m = filteredMessages[i]
@@ -654,6 +907,256 @@ const Chat = () => {
     }
     return null
   }, [filteredMessages, sender])
+
+  const loadFullThreadMessages = useCallback(async () => {
+    if (!selectedUser || !sender) return []
+
+    const all = [...filteredMessages]
+    const seen = new Set(all.map((m) => m._id))
+    let before =
+      oldestCursorRef.current ??
+      [...filteredMessages]
+        .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())[0]
+        ?.createdAt ??
+      null
+    let pages = 0
+
+    while (pages < 25) {
+      const res = await getMessages(sender, selectedUser.phone, {
+        limit: PAGE_SIZE,
+        before: before ?? undefined,
+      })
+      const rows = Array.isArray(res.data) ? (res.data as MessageResponse[]) : []
+      const older = rows.filter(
+        (m) =>
+          !seen.has(m._id) &&
+          !m.isDeleted &&
+          ((m.sender === sender && m.receiver === selectedUser.phone) ||
+            (m.sender === selectedUser.phone && m.receiver === sender)),
+      )
+
+      if (older.length === 0) break
+
+      older.forEach((m) => {
+        seen.add(m._id)
+        all.push(m)
+      })
+
+      older.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
+      before = older[0]?.createdAt ?? null
+      pages += 1
+
+      if (rows.length < PAGE_SIZE) break
+    }
+
+    all.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
+    return all
+  }, [filteredMessages, selectedUser, sender])
+
+  const isMessageStarred = useCallback(
+    (message: MessageResponse) => Boolean(message.starred || starredIdSet.has(message._id)),
+    [starredIdSet],
+  )
+
+  const starredSections = useMemo(() => {
+    const textMessages: MessageResponse[] = []
+    const mediaAndLinks: MessageResponse[] = []
+
+    for (const message of starredMessages) {
+      const decoded = decodeRichMessage(message.message)
+      if (decoded.kind === "plain") {
+        if (extractUrlsFromText(decoded.value).length > 0 || isGifUrl(decoded.value.trim())) {
+          mediaAndLinks.push(message)
+        } else {
+          textMessages.push(message)
+        }
+        continue
+      }
+
+      if (decoded.value.type === "file" || decoded.value.type === "gif") {
+        mediaAndLinks.push(message)
+        continue
+      }
+
+      if (extractUrlsFromText(decoded.value.text ?? "").length > 0) {
+        mediaAndLinks.push(message)
+        continue
+      }
+
+      textMessages.push(message)
+    }
+
+    return { textMessages, mediaAndLinks }
+  }, [starredMessages])
+
+  useEffect(() => {
+    if (!starredStorageKey) {
+      setStarredMessageIds([])
+      return
+    }
+
+    try {
+      const raw = localStorage.getItem(starredStorageKey)
+      const parsed = raw ? (JSON.parse(raw) as unknown) : []
+      setStarredMessageIds(Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === "string") : [])
+    } catch {
+      setStarredMessageIds([])
+    }
+  }, [starredStorageKey])
+
+  useEffect(() => {
+    if (!starredStorageKey) return
+    localStorage.setItem(starredStorageKey, JSON.stringify(starredMessageIds))
+  }, [starredMessageIds, starredStorageKey])
+
+  useEffect(() => {
+    if (!selectedUser) {
+      setSharedContent(EMPTY_SHARED_CONTENT)
+      setSharedContentNotice(null)
+      setSharedPanelTab("media")
+      setStarredMessages([])
+      setStarredMessagesNotice(null)
+      return
+    }
+
+    setSharedContent(derivedSharedContent)
+  }, [derivedSharedContent, selectedUser])
+
+  useEffect(() => {
+    if (!isSharedPanelOpen || !selectedUser || !sender) return
+
+    let cancelled = false
+
+    const loadSharedContent = async () => {
+      setSharedContentLoading(true)
+      setSharedContentNotice(null)
+
+      const params = { user1: sender, user2: selectedUser.phone }
+      const chatId = selectedUser._id || selectedUser.phone
+
+      try {
+        const [mediaRes, filesRes, linksRes] = await Promise.allSettled([
+          getChatMedia(chatId, params),
+          getChatFiles(chatId, params),
+          getChatLinks(chatId, params),
+        ])
+
+        if (cancelled) return
+
+        const endpointContent: SharedContentCollection = {
+          media:
+            mediaRes.status === "fulfilled" && Array.isArray(mediaRes.value.data)
+              ? mediaRes.value.data
+              : [],
+          files:
+            filesRes.status === "fulfilled" && Array.isArray(filesRes.value.data)
+              ? filesRes.value.data
+              : [],
+          links:
+            linksRes.status === "fulfilled" && Array.isArray(linksRes.value.data)
+              ? linksRes.value.data
+              : [],
+        }
+
+        const shouldLoadThreadFallback =
+          mediaRes.status === "rejected" ||
+          filesRes.status === "rejected" ||
+          linksRes.status === "rejected" ||
+          (endpointContent.media.length === 0 &&
+            endpointContent.files.length === 0 &&
+            endpointContent.links.length === 0)
+
+        if (shouldLoadThreadFallback) {
+          const fullThreadMessages = await loadFullThreadMessages()
+          if (cancelled) return
+          const fallbackContent = extractSharedContent(fullThreadMessages)
+          setSharedContent(mergeSharedCollections(endpointContent, fallbackContent))
+          setSharedContentNotice(
+            "Showing results derived from chat history because the media endpoints are empty or unavailable.",
+          )
+          return
+        }
+
+        setSharedContent(mergeSharedCollections(endpointContent, derivedSharedContent))
+        setSharedContentNotice(null)
+      } catch {
+        if (cancelled) return
+        try {
+          const fullThreadMessages = await loadFullThreadMessages()
+          if (cancelled) return
+          setSharedContent(extractSharedContent(fullThreadMessages))
+          setSharedContentNotice("Showing results derived from full chat history until the media endpoints are available.")
+        } catch {
+          if (cancelled) return
+          setSharedContent(derivedSharedContent)
+          setSharedContentNotice("Showing results derived from loaded messages only.")
+        }
+      } finally {
+        if (!cancelled) setSharedContentLoading(false)
+      }
+    }
+
+    void loadSharedContent()
+
+    return () => {
+      cancelled = true
+    }
+  }, [derivedSharedContent, isSharedPanelOpen, loadFullThreadMessages, selectedUser, sender])
+
+  useEffect(() => {
+    if (!isStarredPanelOpen || !selectedUser || !sender) return
+
+    let cancelled = false
+
+    const loadStarredMessages = async () => {
+      setStarredMessagesLoading(true)
+      setStarredMessagesNotice(null)
+
+      const chatId = selectedUser._id || selectedUser.phone
+      const params = { user1: sender, user2: selectedUser.phone }
+
+      try {
+        const res = await getChatStarredMessages(chatId, params)
+        if (cancelled) return
+
+        const apiRows = Array.isArray(res.data) ? (res.data as MessageResponse[]) : []
+        const fullThread = await loadFullThreadMessages()
+        if (cancelled) return
+
+        const merged = [...apiRows, ...fullThread.filter((message) => isMessageStarred(message))]
+        const unique = new Map<string, MessageResponse>()
+        for (const message of merged) {
+          unique.set(message._id, { ...message, starred: true })
+        }
+
+        const next = [...unique.values()].sort(
+          (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+        )
+        setStarredMessages(next)
+        if (apiRows.length === 0 && next.length > 0) {
+          setStarredMessagesNotice("Showing locally starred messages because the starred endpoint returned no results.")
+        }
+      } catch {
+        if (cancelled) return
+        const fullThread = await loadFullThreadMessages()
+        if (cancelled) return
+        const next = fullThread
+          .filter((message) => isMessageStarred(message))
+          .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+          .map((message) => ({ ...message, starred: true }))
+        setStarredMessages(next)
+        setStarredMessagesNotice("Showing locally starred messages until the starred endpoint is available.")
+      } finally {
+        if (!cancelled) setStarredMessagesLoading(false)
+      }
+    }
+
+    void loadStarredMessages()
+
+    return () => {
+      cancelled = true
+    }
+  }, [isMessageStarred, isStarredPanelOpen, loadFullThreadMessages, selectedUser, sender])
 
   const startTicTacToe = async () => {
     if (!selectedUser || !sender) return
@@ -960,6 +1463,38 @@ const Chat = () => {
     }
   }, [])
 
+  const handleInputChange = useCallback(
+    (nextValue: string) => {
+      setInput(nextValue)
+      emitPresenceHeartbeat()
+
+      if (!selectedUser || editingMessageId) {
+        stopTypingIndicator()
+        return
+      }
+
+      if (!nextValue.trim()) {
+        stopTypingIndicator(selectedUser.phone)
+        return
+      }
+
+      if (!isPageActive) {
+        stopTypingIndicator(selectedUser.phone)
+        return
+      }
+
+      startTypingIndicator(selectedUser.phone)
+    },
+    [
+      editingMessageId,
+      emitPresenceHeartbeat,
+      isPageActive,
+      selectedUser,
+      startTypingIndicator,
+      stopTypingIndicator,
+    ],
+  )
+
   const loadUsers = async () => {
     try {
       const res = await getUsers()
@@ -1130,6 +1665,11 @@ const Chat = () => {
     )
   }, [filteredMessages, selectedUser, sender, isPageActive])
 
+  useEffect(() => {
+    if (selectedUser && input.trim() && isPageActive && !editingMessageId) return
+    stopTypingIndicator(selectedUser?.phone ?? null)
+  }, [editingMessageId, input, isPageActive, selectedUser?.phone, stopTypingIndicator])
+
   const sendOutgoingTo = useCallback(
     (receiverPhone: string, rawMessage: string, opts?: { clearInput?: boolean }) => {
       if (!receiverPhone || !sender) return
@@ -1140,6 +1680,8 @@ const Chat = () => {
         message: rawMessage,
       }
 
+      emitPresenceHeartbeat(receiverPhone)
+      stopTypingIndicator(receiverPhone)
       socketService.sendMessage(payload)
       setUnreadCounts((prev) => ({ ...prev, [receiverPhone]: 0 }))
       socketService.markSeen({ sender: receiverPhone, receiver: sender })
@@ -1155,7 +1697,7 @@ const Chat = () => {
       }
       window.requestAnimationFrame(() => scrollToBottom("smooth"))
     },
-    [scrollToBottom, selectedUser?.phone, sender],
+    [emitPresenceHeartbeat, scrollToBottom, selectedUser?.phone, sender, stopTypingIndicator],
   )
 
   const isAllowedUploadFile = useCallback((file: File) => {
@@ -1251,6 +1793,7 @@ const Chat = () => {
     if (!selectedUser || !sender) return
     if (!trimmed && !selectedGifUrl) return
     setSendError(null)
+    stopTypingIndicator(selectedUser.phone)
 
     if (editingMessageId) {
       if (!editBase) {
@@ -1413,6 +1956,45 @@ const Chat = () => {
     return hit?.emoji ?? null
   }, [])
 
+  const toggleStarMessage = useCallback(
+    async (message: MessageResponse) => {
+      const nextStarred = !isMessageStarred(message)
+
+      setStarredMessageIds((prev) => {
+        if (nextStarred) {
+          return prev.includes(message._id) ? prev : [...prev, message._id]
+        }
+        return prev.filter((id) => id !== message._id)
+      })
+
+      setMessages((prev) =>
+        prev.map((item) =>
+          item._id === message._id ? { ...item, starred: nextStarred } : item,
+        ),
+      )
+
+      setStarredMessages((prev) => {
+        if (nextStarred) {
+          const next = [{ ...message, starred: true }, ...prev.filter((item) => item._id !== message._id)]
+          next.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+          return next
+        }
+        return prev.filter((item) => item._id !== message._id)
+      })
+
+      try {
+        await setMessageStarred(message._id, nextStarred)
+      } catch {
+        setStarredMessagesNotice(
+          nextStarred
+            ? "Star saved locally until the starred endpoint is available."
+            : "Unstar saved locally until the starred endpoint is available.",
+        )
+      }
+    },
+    [isMessageStarred],
+  )
+
   const messageItems = useMemo(() => {
     const items: Array<
       | { type: "date"; key: string; label: string }
@@ -1434,6 +2016,7 @@ const Chat = () => {
 
   const selectChatUser = useCallback(
     (user: User, { closeDrawer }: { closeDrawer?: boolean } = {}) => {
+      stopTypingIndicator()
       setSelectedUser(user)
       setReplyTo(null)
       setSelectedGifUrl(null)
@@ -1446,7 +2029,7 @@ const Chat = () => {
         window.dispatchEvent(new Event("unreadCountsChanged"))
       }
     },
-    [sender],
+    [sender, stopTypingIndicator],
   )
 
   return (
@@ -1689,19 +2272,50 @@ const Chat = () => {
               {"\u2630"}
             </button>
             {selectedUser ? (
-              <strong
-              id="view-user-name"
-              style={{
+              <div>
+                <strong
+                  id="view-user-name"
+                  style={{
                   filter: privacyMode ? "blur(10px)" : undefined,
                   cursor: privacyMode ? "pointer" : undefined,
                   transition: privacyMode ? "filter 0.2s ease" : undefined,
-                }}
-                >{selectedUser.name}</strong>
+                  }}
+                >
+                  {selectedUser.name}
+                </strong>
+                <div className="small text-body-secondary">
+                  {presenceLabel || "Offline"}
+                </div>
+              </div>
             ) : (
               "Select a user"
             )}
           </div>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <button
+              type="button"
+              className={`btn btn-sm ${
+                isStarredPanelOpen ? "btn-warning" : "btn-outline-warning"
+              }`}
+              onClick={() => setIsStarredPanelOpen((v) => !v)}
+              title="Starred messages"
+              aria-label="Toggle starred messages panel"
+              disabled={!selectedUser}
+            >
+              Starred
+            </button>
+            <button
+              type="button"
+              className={`btn btn-sm ${
+                isSharedPanelOpen ? "btn-primary" : "btn-outline-primary"
+              }`}
+              onClick={() => setIsSharedPanelOpen((v) => !v)}
+              title="Media and files"
+              aria-label="Toggle media and files panel"
+              disabled={!selectedUser}
+            >
+              Media & Files
+            </button>
             <button
               type="button"
               className="btn btn-sm btn-outline-primary"
@@ -1724,6 +2338,441 @@ const Chat = () => {
             </button>
           </div>
         </div>
+
+        {selectedUser && isStarredPanelOpen && (
+          <>
+            <div
+              className="position-absolute top-0 start-0 w-100 h-100"
+              style={{ background: "rgba(0,0,0,0.35)", zIndex: 1450 }}
+              role="presentation"
+              onClick={() => setIsStarredPanelOpen(false)}
+            />
+            <div
+              className="position-absolute top-0 end-0 h-100 bg-body border-start shadow-lg d-flex flex-column"
+              style={{
+                width: isMobileLayout ? "100%" : "min(460px, 44vw)",
+                zIndex: 1451,
+              }}
+              role="dialog"
+              aria-modal="true"
+              aria-label="Starred messages viewer"
+            >
+              <div className="p-3 border-bottom d-flex align-items-start justify-content-between gap-3">
+                <div>
+                  <div className="fw-semibold">Starred Messages</div>
+                  <div className="small text-body-secondary">
+                    Important messages saved in this chat
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="btn btn-sm btn-outline-secondary"
+                  onClick={() => setIsStarredPanelOpen(false)}
+                  aria-label="Close starred messages panel"
+                  title="Close"
+                >
+                  {"\u2715"}
+                </button>
+              </div>
+              <div className="p-3 flex-grow-1" style={{ overflowY: "auto" }}>
+                {starredMessagesLoading && (
+                  <div className="small text-body-secondary mb-3">Loading starred messages...</div>
+                )}
+                {starredMessagesNotice && (
+                  <div className="alert alert-secondary py-2 mb-3">{starredMessagesNotice}</div>
+                )}
+
+                <div className="mb-4">
+                  <div className="fw-semibold mb-2">
+                    Messages ({starredSections.textMessages.length})
+                  </div>
+                  {starredSections.textMessages.length > 0 ? (
+                    <div className="d-flex flex-column gap-2">
+                      {starredSections.textMessages.map((message) => {
+                        const decoded = decodeRichMessage(message.message)
+                        const text =
+                          decoded.kind === "plain"
+                            ? decoded.value
+                            : decoded.value.text ?? ""
+
+                        return (
+                          <div key={message._id} className="border rounded p-3 bg-body-tertiary">
+                            <div className="small text-body-secondary mb-1">
+                              {message.sender === sender ? "You" : selectedUser.name} ·{" "}
+                              {formatDateLabel(message.createdAt)} · {formatTimeLabel(message.createdAt)}
+                            </div>
+                            <div style={{ whiteSpace: "pre-wrap" }}>{renderEmojiText(text)}</div>
+                            <div className="d-flex align-items-center justify-content-between mt-2">
+                              <button
+                                type="button"
+                                className="btn btn-link btn-sm px-0"
+                                onClick={() => {
+                                  scrollToMessage(message._id)
+                                  setIsStarredPanelOpen(false)
+                                }}
+                              >
+                                View in chat
+                              </button>
+                              <button
+                                type="button"
+                                className="btn btn-sm btn-outline-warning"
+                                onClick={() => void toggleStarMessage(message)}
+                              >
+                                Unstar
+                              </button>
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  ) : (
+                    <div className="text-body-secondary small">No starred text messages yet.</div>
+                  )}
+                </div>
+
+                <div>
+                  <div className="fw-semibold mb-2">
+                    Media / Links ({starredSections.mediaAndLinks.length})
+                  </div>
+                  {starredSections.mediaAndLinks.length > 0 ? (
+                    <div className="d-flex flex-column gap-2">
+                      {starredSections.mediaAndLinks.map((message) => {
+                        const decoded = decodeRichMessage(message.message)
+                        const plain = decoded.kind === "plain" ? decoded.value.trim() : ""
+                        const plainUrls = decoded.kind === "plain" ? extractUrlsFromText(plain) : []
+
+                        return (
+                          <div key={message._id} className="border rounded p-3 bg-body-tertiary">
+                            <div className="small text-body-secondary mb-2">
+                              {message.sender === sender ? "You" : selectedUser.name} ·{" "}
+                              {formatDateLabel(message.createdAt)} · {formatTimeLabel(message.createdAt)}
+                            </div>
+
+                            {decoded.kind === "rich" && decoded.value.type === "gif" && decoded.value.gifUrl && (
+                              <img
+                                src={decoded.value.gifUrl}
+                                alt={decoded.value.text ?? "GIF"}
+                                style={{ width: 120, height: 120, objectFit: "cover", borderRadius: 8 }}
+                              />
+                            )}
+
+                            {decoded.kind === "rich" && decoded.value.type === "file" && (
+                              <div className="d-flex flex-column gap-2">
+                                {(decoded.value.mimeType?.startsWith("image/") ||
+                                  /\.(png|jpe?g|webp|gif|bmp|svg)$/i.test(decoded.value.fileUrl.toLowerCase())) && (
+                                  <img
+                                    src={decoded.value.fileUrl}
+                                    alt={decoded.value.fileName ?? "Image"}
+                                    style={{ width: 120, height: 120, objectFit: "cover", borderRadius: 8 }}
+                                  />
+                                )}
+                                {(decoded.value.mimeType?.startsWith("video/") ||
+                                  /\.(mp4|webm|ogg|mov|m4v|avi|mkv)$/i.test(decoded.value.fileUrl.toLowerCase())) && (
+                                  <video
+                                    src={decoded.value.fileUrl}
+                                    controls
+                                    style={{ width: "100%", maxWidth: 220, borderRadius: 8 }}
+                                  />
+                                )}
+                                <a
+                                  href={decoded.value.fileUrl}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  style={{ wordBreak: "break-word" }}
+                                >
+                                  {decoded.value.fileName ?? "Attachment"}
+                                </a>
+                              </div>
+                            )}
+
+                            {decoded.kind === "plain" && plainUrls.length > 0 && (
+                              <div className="d-flex flex-column gap-1">
+                                {plainUrls.map((url) => (
+                                  <a key={url} href={url} target="_blank" rel="noreferrer" style={{ wordBreak: "break-word" }}>
+                                    {url}
+                                  </a>
+                                ))}
+                              </div>
+                            )}
+
+                            {decoded.kind === "rich" && decoded.value.type === "text" && decoded.value.text && (
+                              <div className="d-flex flex-column gap-1">
+                                {extractUrlsFromText(decoded.value.text).map((url) => (
+                                  <a key={url} href={url} target="_blank" rel="noreferrer" style={{ wordBreak: "break-word" }}>
+                                    {url}
+                                  </a>
+                                ))}
+                              </div>
+                            )}
+
+                            {((decoded.kind === "plain" && !plainUrls.length) ||
+                              (decoded.kind === "rich" && decoded.value.text)) && (
+                              <div className="small text-body-secondary mt-2" style={{ whiteSpace: "pre-wrap" }}>
+                                {decoded.kind === "plain" ? plain : decoded.value.text ?? ""}
+                              </div>
+                            )}
+
+                            <div className="d-flex align-items-center justify-content-between mt-2">
+                              <button
+                                type="button"
+                                className="btn btn-link btn-sm px-0"
+                                onClick={() => {
+                                  scrollToMessage(message._id)
+                                  setIsStarredPanelOpen(false)
+                                }}
+                              >
+                                View in chat
+                              </button>
+                              <button
+                                type="button"
+                                className="btn btn-sm btn-outline-warning"
+                                onClick={() => void toggleStarMessage(message)}
+                              >
+                                Unstar
+                              </button>
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  ) : (
+                    <div className="text-body-secondary small">No starred media or links yet.</div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </>
+        )}
+
+        {selectedUser && isSharedPanelOpen && (
+          <>
+            <div
+              className="position-absolute top-0 start-0 w-100 h-100"
+              style={{ background: "rgba(0,0,0,0.35)", zIndex: 1400 }}
+              role="presentation"
+              onClick={() => setIsSharedPanelOpen(false)}
+            />
+            <div
+              className="position-absolute top-0 end-0 h-100 bg-body border-start shadow-lg d-flex flex-column"
+              style={{
+                width: isMobileLayout ? "100%" : "min(440px, 42vw)",
+                zIndex: 1401,
+              }}
+              role="dialog"
+              aria-modal="true"
+              aria-label="Media and files viewer"
+            >
+              <div className="p-3 border-bottom d-flex align-items-start justify-content-between gap-3">
+                <div>
+                  <div className="fw-semibold">Media & Files</div>
+                  <div className="small text-body-secondary">
+                    Browse everything shared in this chat
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="btn btn-sm btn-outline-secondary"
+                  onClick={() => setIsSharedPanelOpen(false)}
+                  aria-label="Close media and files panel"
+                  title="Close"
+                >
+                  {"\u2715"}
+                </button>
+              </div>
+              <div className="p-3 border-bottom">
+                <div className="btn-group w-100" role="tablist" aria-label="Shared content tabs">
+                  <button
+                    type="button"
+                    className={`btn btn-sm ${
+                      sharedPanelTab === "media" ? "btn-primary" : "btn-outline-primary"
+                    }`}
+                    onClick={() => setSharedPanelTab("media")}
+                  >
+                    Media ({sharedContent.media.length})
+                  </button>
+                  <button
+                    type="button"
+                    className={`btn btn-sm ${
+                      sharedPanelTab === "files" ? "btn-primary" : "btn-outline-primary"
+                    }`}
+                    onClick={() => setSharedPanelTab("files")}
+                  >
+                    Files ({sharedContent.files.length})
+                  </button>
+                  <button
+                    type="button"
+                    className={`btn btn-sm ${
+                      sharedPanelTab === "links" ? "btn-primary" : "btn-outline-primary"
+                    }`}
+                    onClick={() => setSharedPanelTab("links")}
+                  >
+                    Links ({sharedContent.links.length})
+                  </button>
+                </div>
+              </div>
+              <div className="p-3 flex-grow-1" style={{ overflowY: "auto" }}>
+                {sharedContentLoading && (
+                  <div className="small text-body-secondary mb-3">Loading shared content...</div>
+                )}
+                {sharedContentNotice && (
+                  <div className="alert alert-secondary py-2 mb-3">{sharedContentNotice}</div>
+                )}
+
+                {sharedPanelTab === "media" && (
+                  sharedContent.media.length > 0 ? (
+                    <div
+                      className="d-grid gap-3"
+                      style={{
+                        gridTemplateColumns: isMobileLayout
+                          ? "repeat(2, minmax(0, 1fr))"
+                          : "repeat(2, minmax(0, 1fr))",
+                      }}
+                    >
+                      {sharedContent.media.map((item) => (
+                        <div key={item.id} className="border rounded p-2 bg-body-tertiary">
+                          {item.mediaType === "video" ? (
+                            <video
+                              src={item.url}
+                              controls
+                              preload="metadata"
+                              style={{ width: "100%", aspectRatio: "1 / 1", borderRadius: 8, objectFit: "cover" }}
+                            />
+                          ) : (
+                            <button
+                              type="button"
+                              className="btn p-0 border-0 w-100"
+                              onClick={() => setImagePreview({ url: item.url, title: item.title })}
+                              title={`Preview ${item.title}`}
+                              aria-label={`Preview ${item.title}`}
+                              style={{ background: "transparent", boxShadow: "none" }}
+                            >
+                              <img
+                                src={item.url}
+                                alt={item.title}
+                                style={{ width: "100%", aspectRatio: "1 / 1", borderRadius: 8, objectFit: "cover" }}
+                                loading="lazy"
+                              />
+                            </button>
+                          )}
+                          <div className="mt-2 small fw-semibold text-truncate">{item.title}</div>
+                          <div className="small text-body-secondary">
+                            {formatDateLabel(item.createdAt)} · {formatTimeLabel(item.createdAt)}
+                          </div>
+                          {item.text && (
+                            <div className="small text-body-secondary mt-1 text-truncate">
+                              {item.text}
+                            </div>
+                          )}
+                          <button
+                            type="button"
+                            className="btn btn-link btn-sm px-0 mt-1"
+                            onClick={() => scrollToMessage(item.messageId)}
+                          >
+                            View message
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="text-body-secondary small">No media shared in this chat yet.</div>
+                  )
+                )}
+
+                {sharedPanelTab === "files" && (
+                  sharedContent.files.length > 0 ? (
+                    <div className="d-flex flex-column gap-2">
+                      {sharedContent.files.map((item) => (
+                        <div
+                          key={item.id}
+                          className="border rounded p-3 bg-body-tertiary d-flex align-items-start justify-content-between gap-3"
+                        >
+                          <div style={{ minWidth: 0 }}>
+                            <div className="fw-semibold text-truncate">{item.fileName}</div>
+                            <div className="small text-body-secondary">
+                              {[item.mimeType, formatFileSize(item.sizeBytes), formatDateLabel(item.createdAt)]
+                                .filter(Boolean)
+                                .join(" · ")}
+                            </div>
+                            {item.text && (
+                              <div className="small text-body-secondary mt-1" style={{ whiteSpace: "pre-wrap" }}>
+                                {item.text}
+                              </div>
+                            )}
+                          </div>
+                          <div className="d-flex flex-column align-items-end gap-2">
+                            <a
+                              href={item.url}
+                              download={item.fileName}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="btn btn-sm btn-outline-primary"
+                            >
+                              Download
+                            </a>
+                            <button
+                              type="button"
+                              className="btn btn-sm btn-link p-0"
+                              onClick={() => scrollToMessage(item.messageId)}
+                            >
+                              View message
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="text-body-secondary small">No documents shared in this chat yet.</div>
+                  )
+                )}
+
+                {sharedPanelTab === "links" && (
+                  sharedContent.links.length > 0 ? (
+                    <div className="d-flex flex-column gap-2">
+                      {sharedContent.links.map((item) => (
+                        <div
+                          key={item.id}
+                          className="border rounded p-3 bg-body-tertiary d-flex align-items-start justify-content-between gap-3"
+                        >
+                          <div style={{ minWidth: 0 }}>
+                            <a
+                              href={item.url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="fw-semibold"
+                              style={{ wordBreak: "break-word" }}
+                            >
+                              {item.label}
+                            </a>
+                            <div className="small text-body-secondary" style={{ wordBreak: "break-word" }}>
+                              {item.url}
+                            </div>
+                            <div className="small text-body-secondary mt-1">
+                              {formatDateLabel(item.createdAt)} · {formatTimeLabel(item.createdAt)}
+                            </div>
+                            {item.text && item.text !== item.url && (
+                              <div className="small text-body-secondary mt-1" style={{ whiteSpace: "pre-wrap" }}>
+                                {item.text}
+                              </div>
+                            )}
+                          </div>
+                          <button
+                            type="button"
+                            className="btn btn-sm btn-link p-0"
+                            onClick={() => scrollToMessage(item.messageId)}
+                          >
+                            View message
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="text-body-secondary small">No links shared in this chat yet.</div>
+                  )
+                )}
+              </div>
+            </div>
+          </>
+        )}
 
         {/* Messages */}
         <div
@@ -1863,7 +2912,7 @@ const Chat = () => {
                 const bubble = (() => {
                   if (decoded.kind === "plain") {
                     const plain = decoded.value.trim()
-                    const looksLikeSingleGifUrl = isLikelyGifUrl(plain) && !/\s/.test(plain)
+                    const looksLikeSingleGifUrl = isGifUrl(plain) && !/\s/.test(plain)
                     if (looksLikeSingleGifUrl) {
                       return (
                         <span
@@ -2087,7 +3136,8 @@ const Chat = () => {
                     cursor: privacyMode ? "pointer" : undefined,
                     transition: privacyMode ? "filter 0.2s ease" : undefined,
                   }}
-                  onContextMenu={(e) => openMessageMenu(m, isOutgoing, e)}
+                  onMouseDownCapture={(e) => handleMessageSecondaryClick(m, isOutgoing, e)}
+                  onContextMenuCapture={(e) => openMessageMenu(m, isOutgoing, e)}
                   onMouseEnter={() => {
                     if (privacyMode) {
                       const el = messageElByIdRef.current[m._id]
@@ -2259,7 +3309,7 @@ const Chat = () => {
                 const decoded = decodeRichMessage(m.message)
                 const plain = decoded.kind === "plain" ? decoded.value.trim() : ""
                 const looksLikeSingleGifUrl =
-                  decoded.kind === "plain" && isLikelyGifUrl(plain) && !/\s/.test(plain)
+                  decoded.kind === "plain" && isGifUrl(plain) && !/\s/.test(plain)
                 const canEdit =
                   (decoded.kind === "plain" && !looksLikeSingleGifUrl) ||
                   (decoded.kind === "rich" &&
@@ -2299,6 +3349,18 @@ const Chat = () => {
                         }}
                       >
                         {"\u29C9"}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-sm sl-menu-icon-btn"
+                        title={isMessageStarred(m) ? "Unstar message" : "Star message"}
+                        aria-label={isMessageStarred(m) ? "Unstar message" : "Star message"}
+                        onClick={() => {
+                          void toggleStarMessage(m)
+                          setMessageMenu(null)
+                        }}
+                      >
+                        {isMessageStarred(m) ? "\u2605" : "\u2606"}
                       </button>
 
                       {canManage && canEdit && (
@@ -2537,8 +3599,10 @@ const Chat = () => {
                 className="form-control"
                 rows={3}
                 value={input}
-                onChange={(e) => setInput(e.target.value)}
+                onChange={(e) => handleInputChange(e.target.value)}
                 onPaste={onPasteUpload}
+                onFocus={() => emitPresenceHeartbeat()}
+                onBlur={() => stopTypingIndicator(selectedUser?.phone ?? null)}
                 onKeyDown={(e) => {
                   if (e.key !== "Enter") return
                   if (e.nativeEvent.isComposing) return
@@ -2555,6 +3619,7 @@ const Chat = () => {
                     setEditBase(null)
                     setEditError(null)
                     setInput("")
+                    stopTypingIndicator(selectedUser?.phone ?? null)
                   }
                 }}
                 placeholder={

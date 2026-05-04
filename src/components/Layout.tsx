@@ -157,6 +157,38 @@ const Layout = ({ children }: Props) => {
   }, [token, userPhone, refreshUnseenTotal]);
 
   useEffect(() => {
+    if (!token || !userPhone) return;
+
+    const emitPresence = () => {
+      const isActiveChatWindow = isPageActive && location.pathname === "/chat";
+      const activeThreadPhone =
+        isActiveChatWindow ? activeChatPhone : null;
+      socketService.setActiveThread({
+        userPhone,
+        activeThreadPhone,
+        isChatActive: isActiveChatWindow,
+      });
+      if (isActiveChatWindow) {
+        socketService.heartbeat({
+          userPhone,
+          activeThreadPhone,
+          isChatActive: true,
+        });
+      }
+    };
+
+    emitPresence();
+
+    const interval = window.setInterval(() => {
+      emitPresence();
+    }, 30000);
+
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [token, userPhone, activeChatPhone, isPageActive, location.pathname]);
+
+  useEffect(() => {
     if (isPageActive && location.pathname === "/chat") setGameNotifyTotal(0);
   }, [isPageActive, location.pathname]);
 
