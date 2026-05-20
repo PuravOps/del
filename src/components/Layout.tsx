@@ -1,15 +1,50 @@
-﻿import { ReactNode, useCallback, useEffect, useState } from "react";
+import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { socketService } from "../services/socket";
-import { getUnseenCounts, ping } from "../services/api";
+import { getUnseenCounts, ping, updatePrivateNotesVault } from "../services/api";
 import { clearFaviconBadge, setFaviconBadge } from "../utils/favicon";
 import { decodeGameMessage } from "../utils/gameMessage";
 import type { MessageResponse } from "../types/chat.types";
+import type { PrivateNote } from "../types/privateNotes.types";
 import { usePageActivity } from "../utils/usePageActivity";
 
 interface Props {
   children: ReactNode;
 }
+
+type ReminderSession = {
+  scopeKey: string;
+  ownerPhone: string;
+  targetUserPhone: string;
+  notes: PrivateNote[];
+};
+
+type ReminderPopup = {
+  scopeKey: string;
+  noteId: string;
+  heading: string;
+  content: string;
+  remindAt: string;
+};
+
+const NOTES_REMINDER_SYNC_EVENT = "privateNotesReminderSessionSync";
+const NOTES_REMINDER_UPDATE_EVENT = "privateNotesReminderNotesUpdated";
+
+const formatReminderDateTime = (iso: string) => {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "-";
+
+  return new Intl.DateTimeFormat(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+};
+
+const getActiveReminderAt = (note: PrivateNote) =>
+  note.reminderSnoozedUntil || note.reminderAt || null;
 
 const Layout = ({ children }: Props) => {
   const token = localStorage.getItem("token");
@@ -25,11 +60,14 @@ const Layout = ({ children }: Props) => {
   const [isNavOpen, setIsNavOpen] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [socketConnected, setSocketConnected] = useState(false);
+  const [reminderSessions, setReminderSessions] = useState<Record<string, ReminderSession>>({});
+  const [activeReminderPopups, setActiveReminderPopups] = useState<ReminderPopup[]>([]);
 
   const location = useLocation();
   const isPageActive = usePageActivity();
   const [activeChatPhone, setActiveChatPhone] = useState<string | null>(null);
   const [isActiveChatThread, setIsActiveChatThread] = useState(false);
+  const reminderTimerRef = useRef<number | null>(null);
 
   const normalizeId = (v: string) => v.trim().replace(/[^\d+]/g, "");
   const toDigits = (v: string) => v.replace(/\D/g, "");
@@ -53,7 +91,6 @@ const Layout = ({ children }: Props) => {
       if (isSameUserId(userPhone, g.players.sender.id)) return g.players.receiver.id;
       if (isSameUserId(userPhone, g.players.receiver.id)) return g.players.sender.id;
     }
-    // fallback
     if (!isSameUserId(userPhone, msg.sender)) return msg.sender;
     return msg.receiver;
   };
@@ -71,6 +108,93 @@ const Layout = ({ children }: Props) => {
     return isSameUserId(userPhone, msg.sender) || isSameUserId(userPhone, msg.receiver);
   };
 
+  const noteReminderTotal = activeReminderPopups.length;
+
+  const syncReminderNotesToChat = useCallback((session: ReminderSession) => {
+    window.dispatchEvent(
+      new CustomEvent(NOTES_REMINDER_UPDATE_EVENT, {
+        detail: { scopeKey: session.scopeKey, notes: session.notes },
+      }),
+    );
+  }, []);
+
+  const persistReminderSession = useCallback(
+    async (session: ReminderSession) => {
+      await updatePrivateNotesVault(
+        session.targetUserPhone,
+        { notes: session.notes },
+        { timeout: 10000 },
+      );
+      syncReminderNotesToChat(session);
+    },
+    [syncReminderNotesToChat],
+  );
+
+  const reminderPopupKeys = useMemo(
+    () => new Set(activeReminderPopups.map((item) => `${item.scopeKey}:${item.noteId}:${item.remindAt}`)),
+    [activeReminderPopups],
+  );
+
+  const dismissReminderPopup = useCallback((scopeKey: string, noteId: string) => {
+    setActiveReminderPopups((prev) =>
+      prev.filter((item) => !(item.scopeKey === scopeKey && item.noteId === noteId)),
+    );
+  }, []);
+
+  const updateReminderSessionNote = useCallback(
+    async (
+      popup: ReminderPopup,
+      updater: (note: PrivateNote) => PrivateNote,
+    ) => {
+      const session = reminderSessions[popup.scopeKey];
+      if (!session) {
+        dismissReminderPopup(popup.scopeKey, popup.noteId);
+        return;
+      }
+
+      const nextSession: ReminderSession = {
+        ...session,
+        notes: session.notes.map((note) => (note.id === popup.noteId ? updater(note) : note)),
+      };
+
+      setReminderSessions((prev) => ({ ...prev, [nextSession.scopeKey]: nextSession }));
+      dismissReminderPopup(popup.scopeKey, popup.noteId);
+
+      try {
+        await persistReminderSession(nextSession);
+      } catch (error) {
+        console.error("Failed to update reminder session", error);
+      }
+    },
+    [dismissReminderPopup, persistReminderSession, reminderSessions],
+  );
+
+  const snoozeReminder = useCallback(
+    async (popup: ReminderPopup, minutes: number) => {
+      const snoozedUntil = new Date(Date.now() + minutes * 60 * 1000).toISOString();
+      await updateReminderSessionNote(popup, (note) => ({
+        ...note,
+        reminderSnoozedUntil: snoozedUntil,
+        reminderLastNotifiedAt: null,
+        updatedAt: new Date().toISOString(),
+      }));
+    },
+    [updateReminderSessionNote],
+  );
+
+  const dismissReminder = useCallback(
+    async (popup: ReminderPopup) => {
+      await updateReminderSessionNote(popup, (note) => ({
+        ...note,
+        reminderAt: null,
+        reminderSnoozedUntil: null,
+        reminderLastNotifiedAt: popup.remindAt,
+        updatedAt: new Date().toISOString(),
+      }));
+    },
+    [updateReminderSessionNote],
+  );
+
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail as
@@ -85,6 +209,23 @@ const Layout = ({ children }: Props) => {
       window.removeEventListener("activeChatThreadChanged", handler);
     };
   }, []);
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as ReminderSession | undefined;
+      if (!detail || detail.ownerPhone !== userPhone || !detail.scopeKey) return;
+
+      setReminderSessions((prev) => ({
+        ...prev,
+        [detail.scopeKey]: detail,
+      }));
+    };
+
+    window.addEventListener(NOTES_REMINDER_SYNC_EVENT, handler);
+    return () => {
+      window.removeEventListener(NOTES_REMINDER_SYNC_EVENT, handler);
+    };
+  }, [userPhone]);
 
   useEffect(() => {
     document.documentElement.setAttribute("data-bs-theme", theme);
@@ -136,10 +277,10 @@ const Layout = ({ children }: Props) => {
     if (!token || !userPhone) return;
 
     socketService.connect(userPhone);
-    const onConn = () => setSocketConnected(true)
-    const onDisc = () => setSocketConnected(false)
-    socketService.onConnect(onConn)
-    socketService.onDisconnect(onDisc)
+    const onConn = () => setSocketConnected(true);
+    const onDisc = () => setSocketConnected(false);
+    socketService.onConnect(onConn);
+    socketService.onDisconnect(onDisc);
 
     void refreshUnseenTotal();
     void ping();
@@ -151,8 +292,8 @@ const Layout = ({ children }: Props) => {
     return () => {
       window.clearInterval(interval);
       socketService.disconnect();
-      socketService.offConnect(onConn)
-      socketService.offDisconnect(onDisc)
+      socketService.offConnect(onConn);
+      socketService.offDisconnect(onDisc);
     };
   }, [token, userPhone, refreshUnseenTotal]);
 
@@ -161,8 +302,7 @@ const Layout = ({ children }: Props) => {
 
     const emitPresence = () => {
       const isActiveChatWindow = isPageActive && location.pathname === "/chat";
-      const activeThreadPhone =
-        isActiveChatWindow ? activeChatPhone : null;
+      const activeThreadPhone = isActiveChatWindow ? activeChatPhone : null;
       socketService.setActiveThread({
         userPhone,
         activeThreadPhone,
@@ -207,8 +347,6 @@ const Layout = ({ children }: Props) => {
         return;
       }
 
-      // Avoid badge flicker when you're actively viewing the app/thread and the chat page
-      // immediately marks messages seen via socket.
       const delayMs = isPageActive ? 350 : 0;
       window.setTimeout(() => {
         void refreshUnseenTotal();
@@ -272,17 +410,104 @@ const Layout = ({ children }: Props) => {
   }, [refreshUnseenTotal, isPageActive, location.pathname]);
 
   useEffect(() => {
-    const combined = unreadTotal + gameNotifyTotal;
+    if (reminderTimerRef.current) {
+      window.clearTimeout(reminderTimerRef.current);
+      reminderTimerRef.current = null;
+    }
+
+    const now = Date.now();
+    const sessionUpdates: ReminderSession[] = [];
+    const newPopups: ReminderPopup[] = [];
+    let nextDueAt: number | null = null;
+
+    for (const session of Object.values(reminderSessions)) {
+      let nextNotes = session.notes;
+      let changed = false;
+
+      for (const note of session.notes) {
+        const remindAt = getActiveReminderAt(note);
+        if (!remindAt) continue;
+
+        const remindTime = new Date(remindAt).getTime();
+        if (Number.isNaN(remindTime)) continue;
+
+        if (remindTime <= now) {
+          const popupKey = `${session.scopeKey}:${note.id}:${remindAt}`;
+          if (note.reminderLastNotifiedAt === remindAt || reminderPopupKeys.has(popupKey)) continue;
+
+          if (!changed) {
+            nextNotes = session.notes.map((item) => ({ ...item }));
+            changed = true;
+          }
+
+          nextNotes = nextNotes.map((item) =>
+            item.id === note.id ? { ...item, reminderLastNotifiedAt: remindAt } : item,
+          );
+
+          newPopups.push({
+            scopeKey: session.scopeKey,
+            noteId: note.id,
+            heading: note.heading,
+            content: note.content,
+            remindAt,
+          });
+          continue;
+        }
+
+        nextDueAt = nextDueAt === null ? remindTime : Math.min(nextDueAt, remindTime);
+      }
+
+      if (changed) {
+        sessionUpdates.push({ ...session, notes: nextNotes });
+      }
+    }
+
+    if (sessionUpdates.length > 0) {
+      setReminderSessions((prev) => {
+        const next = { ...prev };
+        for (const session of sessionUpdates) {
+          next[session.scopeKey] = session;
+        }
+        return next;
+      });
+
+      setActiveReminderPopups((prev) => [...prev, ...newPopups]);
+
+      sessionUpdates.forEach((session) => {
+        void persistReminderSession(session);
+      });
+      return;
+    }
+
+    if (nextDueAt !== null) {
+      const delay = Math.max(0, Math.min(nextDueAt - now, 2147483647));
+      reminderTimerRef.current = window.setTimeout(() => {
+        setReminderSessions((prev) => ({ ...prev }));
+      }, delay);
+    }
+
+    return () => {
+      if (reminderTimerRef.current) {
+        window.clearTimeout(reminderTimerRef.current);
+        reminderTimerRef.current = null;
+      }
+    };
+  }, [persistReminderSession, reminderPopupKeys, reminderSessions]);
+
+  useEffect(() => {
+    const combined = unreadTotal + gameNotifyTotal + noteReminderTotal;
     if (combined > 0) {
       void setFaviconBadge(combined);
       return;
     }
 
     clearFaviconBadge();
-  }, [unreadTotal, gameNotifyTotal]);
+  }, [unreadTotal, gameNotifyTotal, noteReminderTotal]);
 
   const logout = () => {
     socketService.disconnect();
+    setReminderSessions({});
+    setActiveReminderPopups([]);
     localStorage.clear();
     window.location.href = "/login";
   };
@@ -325,6 +550,11 @@ const Layout = ({ children }: Props) => {
                 {unreadTotal + gameNotifyTotal > 99 ? "99+" : unreadTotal + gameNotifyTotal}
               </span>
             )}
+            {noteReminderTotal > 0 && (
+              <span className="badge bg-primary ms-2">
+                {noteReminderTotal > 99 ? "99+" : noteReminderTotal}
+              </span>
+            )}
           </Link>
         </li>
       </ul>
@@ -334,17 +564,25 @@ const Layout = ({ children }: Props) => {
   return !token ? (
     <div className="min-vh-100 bg-body">
       <div className="d-flex justify-content-end p-3">
-        <div style={{display:'flex', gap:8, alignItems:'center'}}>
-          <div style={{width:10, height:10, borderRadius:10, background: socketConnected ? '#0d6efd' : '#dee2e6' }} title={socketConnected ? 'Connected' : 'Disconnected'} />
-        <button
-          type="button"
-          className="btn btn-outline-secondary btn-sm"
-          onClick={toggleTheme}
-          aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
-          title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
-        >
-          {theme === "dark" ? "\u2600\uFE0F" : "\u{1F319}"}
-        </button>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <div
+            style={{
+              width: 10,
+              height: 10,
+              borderRadius: 10,
+              background: socketConnected ? "#0d6efd" : "#dee2e6",
+            }}
+            title={socketConnected ? "Connected" : "Disconnected"}
+          />
+          <button
+            type="button"
+            className="btn btn-outline-secondary btn-sm"
+            onClick={toggleTheme}
+            aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+            title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+          >
+            {theme === "dark" ? "\u2600\uFE0F" : "\u{1F319}"}
+          </button>
         </div>
       </div>
       {children}
@@ -417,9 +655,8 @@ const Layout = ({ children }: Props) => {
         </div>
       ) : null}
 
-      {/* Main Content */}
       <div className="flex-grow-1 d-flex flex-column" style={{ minWidth: 0 }}>
-        <div className="border-bottom bg-body p-2 d-flex align-items-center">
+        <div className="border-bottom bg-body p-2 d-flex align-items-center justify-content-between gap-2">
           <button
             type="button"
             className="btn btn-outline-secondary btn-sm"
@@ -429,9 +666,80 @@ const Layout = ({ children }: Props) => {
           >
             {"\u2630"}
           </button>
+          {noteReminderTotal > 0 && (
+            <div className="d-flex align-items-center">
+              <span className="badge bg-primary">
+                {"\u23F0"} {noteReminderTotal > 99 ? "99+" : noteReminderTotal}
+              </span>
+            </div>
+          )}
         </div>
         <div className="flex-grow-1 p-4 overflow-auto">{children}</div>
       </div>
+
+      {activeReminderPopups.length > 0 && (
+        <div
+          className="position-fixed d-flex flex-column gap-2"
+          style={{
+            top: 16,
+            right: 16,
+            zIndex: 2200,
+            width: "min(360px, calc(100vw - 32px))",
+          }}
+        >
+          {activeReminderPopups.map((popup) => (
+            <div
+              key={`${popup.scopeKey}:${popup.noteId}:${popup.remindAt}`}
+              className="border rounded shadow bg-body p-3"
+            >
+              <div className="d-flex align-items-start justify-content-between gap-2">
+                <div>
+                  <div className="fw-semibold">Reminder</div>
+                  <div className="small text-body-secondary">
+                    {formatReminderDateTime(popup.remindAt)}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="btn btn-sm btn-outline-secondary"
+                  onClick={() => void dismissReminder(popup)}
+                  aria-label="Dismiss reminder"
+                  title="Dismiss"
+                >
+                  {"\u2715"}
+                </button>
+              </div>
+              <div className="fw-semibold mt-2">{popup.heading || "Untitled note"}</div>
+              <div className="small text-body-secondary mt-1" style={{ whiteSpace: "pre-wrap" }}>
+                {popup.content || "No description"}
+              </div>
+              <div className="d-flex flex-wrap gap-2 mt-3">
+                <button
+                  type="button"
+                  className="btn btn-sm btn-warning"
+                  onClick={() => void snoozeReminder(popup, 10)}
+                >
+                  Snooze 10 min
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-sm btn-outline-warning"
+                  onClick={() => void snoozeReminder(popup, 60)}
+                >
+                  Snooze 1 hour
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-sm btn-outline-secondary"
+                  onClick={() => void dismissReminder(popup)}
+                >
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 };

@@ -5,6 +5,7 @@ import type {
   SharedLinkItem,
   SharedMediaItem,
 } from "../types/chat.types";
+import type { PrivateNotesResponse } from "../types/privateNotes.types";
 import type { UserPresenceResponse } from "../types/user.types";
 
 const api = axios.create({
@@ -13,6 +14,11 @@ const api = axios.create({
     "Content-Type": "application/json",
   },
 });
+
+type RequestOptions = {
+  signal?: AbortSignal;
+  timeout?: number;
+};
 
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem("token");
@@ -94,6 +100,33 @@ export const getUserPresence = (phone: string, viewer?: string) =>
   api.get<UserPresenceResponse>(`/users/${encodeURIComponent(phone)}/presence`, {
     params: viewer ? { viewer } : undefined,
   });
+
+export const getPrivateNotesVault = (
+  targetUserPhone: string,
+  options?: RequestOptions,
+) => api.get<PrivateNotesResponse>(`/private-notes/${encodeURIComponent(targetUserPhone)}`, options);
+
+export const createPrivateNotesVault = (
+  targetUserPhone: string,
+  payload: { notes: PrivateNotesResponse["notes"] },
+  options?: RequestOptions,
+) =>
+  api.post<PrivateNotesResponse>(
+    `/private-notes/${encodeURIComponent(targetUserPhone)}`,
+    payload,
+    options,
+  );
+
+export const updatePrivateNotesVault = (
+  targetUserPhone: string,
+  payload: { notes: PrivateNotesResponse["notes"] },
+  options?: RequestOptions,
+) =>
+  api.put<PrivateNotesResponse>(
+    `/private-notes/${encodeURIComponent(targetUserPhone)}`,
+    payload,
+    options,
+  );
 
 export const updateUser = (id: string, data: any) =>
   api.put(`/users/${id}`, data);

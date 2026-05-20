@@ -14,7 +14,11 @@ import {
   getChatLinks,
   setMessageStarred,
   getChatStarredMessages,
+  getPrivateNotesVault,
+  createPrivateNotesVault,
+  updatePrivateNotesVault,
 } from "../services/api"
+import axios from "axios"
 import { socketService } from "./ChatService"
 import TicTacToeCard from "../components/TicTacToeCard"
 import { encodeGameMessage, decodeGameMessage, type TicTacToePayloadV1 } from "../utils/gameMessage"
@@ -37,6 +41,7 @@ import {
 import { extractSharedContent, isGifUrl } from "../utils/chatSharedContent"
 import type { User, UserPresenceResponse } from "../types/user.types"
 import type { PresenceUpdatePayload, TypingUpdatePayload } from "../services/socket"
+import type { PrivateNote } from "../types/privateNotes.types"
 
 const PAGE_SIZE = 30
 const TYPING_STOP_DELAY_MS = 1200
@@ -98,6 +103,48 @@ const formatFileSize = (bytes?: number) => {
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`
 }
+
+const formatNoteDateTimeLabel = (iso: string) => {
+  const d = new Date(iso)
+
+  if (Number.isNaN(d.getTime())) return "-"
+
+  return new Intl.DateTimeFormat(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(d)
+}
+
+const toDateTimeLocalValue = (iso: string | null | undefined) => {
+  if (!iso) return ""
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ""
+
+  const pad = (n: number) => String(n).padStart(2, "0")
+  const local = new Date(d.getTime() - d.getTimezoneOffset() * 60000)
+  return `${local.getFullYear()}-${pad(local.getMonth() + 1)}-${pad(local.getDate())}T${pad(local.getHours())}:${pad(local.getMinutes())}`
+}
+
+const getActiveReminderAt = (note: PrivateNote) => note.reminderSnoozedUntil || note.reminderAt || null
+const NOTES_REMINDER_SYNC_EVENT = "privateNotesReminderSessionSync"
+const NOTES_REMINDER_UPDATE_EVENT = "privateNotesReminderNotesUpdated"
+
+const getErrorStatus = (error: unknown) => {
+  const status = (error as { response?: { status?: unknown } } | null)?.response?.status
+  return typeof status === "number" ? status : null
+}
+
+const getErrorMessage = (error: unknown, fallback: string) => {
+  const message = (error as { response?: { data?: { message?: unknown } } } | null)?.response?.data
+    ?.message
+  return typeof message === "string" && message.trim() ? message : fallback
+}
+
+const isRequestTimeoutError = (error: unknown) =>
+  axios.isAxiosError(error) && (error.code === "ECONNABORTED" || error.code === "ERR_CANCELED")
 
 const mergeSharedCollections = (
   primary: SharedContentCollection,
@@ -190,6 +237,7 @@ const Chat = () => {
   const [uploadError, setUploadError] = useState<string | null>(null)
   const [imagePreview, setImagePreview] = useState<{ url: string; title?: string } | null>(null)
   const [imagePreviewZoom, setImagePreviewZoom] = useState(1)
+  const [isHeaderMenuOpen, setIsHeaderMenuOpen] = useState(false)
   const [isSharedPanelOpen, setIsSharedPanelOpen] = useState(false)
   const [sharedPanelTab, setSharedPanelTab] = useState<"media" | "files" | "links">("media")
   const [sharedContent, setSharedContent] = useState<SharedContentCollection>(EMPTY_SHARED_CONTENT)
@@ -201,6 +249,18 @@ const Chat = () => {
   const [starredMessagesLoading, setStarredMessagesLoading] = useState(false)
   const [starredMessagesNotice, setStarredMessagesNotice] = useState<string | null>(null)
   const [selectedUserPresence, setSelectedUserPresence] = useState<UserPresenceResponse | null>(null)
+  const [isNotesOpen, setIsNotesOpen] = useState(false)
+  const [notesVaultStatus, setNotesVaultStatus] = useState<"idle" | "loading" | "ready">("idle")
+  const [notesLoadAttempt, setNotesLoadAttempt] = useState(0)
+  const [notesLoadError, setNotesLoadError] = useState<string | null>(null)
+  const [privateNotes, setPrivateNotes] = useState<PrivateNote[]>([])
+  const [notesSearchQuery, setNotesSearchQuery] = useState("")
+  const [editingNoteId, setEditingNoteId] = useState<string | null>(null)
+  const [noteHeadingInput, setNoteHeadingInput] = useState("")
+  const [noteContentInput, setNoteContentInput] = useState("")
+  const [noteReminderInput, setNoteReminderInput] = useState("")
+  const [notesSaveError, setNotesSaveError] = useState<string | null>(null)
+  const [notesPersisting, setNotesPersisting] = useState(false)
   const emojiContainerRef = useRef<HTMLDivElement | null>(null)
   const [pickerTheme, setPickerTheme] = useState<Theme>(() =>
     document.documentElement.getAttribute("data-bs-theme") === "dark" ? Theme.DARK : Theme.LIGHT,
@@ -296,6 +356,54 @@ const Chat = () => {
     }
     return formatLastSeenLabel(selectedUserPresence.lastActiveAt)
   }, [selectedUserPresence])
+
+  const resetNotesEditor = useCallback(() => {
+    setEditingNoteId(null)
+    setNoteHeadingInput("")
+    setNoteContentInput("")
+    setNoteReminderInput("")
+    setNotesSaveError(null)
+  }, [])
+
+  const lockNotes = useCallback(() => {
+    setPrivateNotes([])
+    setNotesSearchQuery("")
+    setNotesLoadError(null)
+    setNotesPersisting(false)
+    resetNotesEditor()
+  }, [resetNotesEditor])
+
+  const filteredPrivateNotes = useMemo(() => {
+    const query = notesSearchQuery.trim().toLowerCase()
+    const source = [...privateNotes].sort(
+      (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
+    )
+
+    if (!query) return source
+
+    return source.filter((note) => {
+      const heading = note.heading.toLowerCase()
+      const content = note.content.toLowerCase()
+      return heading.includes(query) || content.includes(query)
+    })
+  }, [notesSearchQuery, privateNotes])
+
+  const persistPrivateNotes = useCallback(
+    async (nextNotes: PrivateNote[]) => {
+      if (!selectedUser || !sender) {
+        throw new Error("Open a chat before saving notes.")
+      }
+
+      const response =
+        notesVaultStatus === "idle"
+          ? await createPrivateNotesVault(selectedUser.phone, { notes: nextNotes }, { timeout: 10000 })
+          : await updatePrivateNotesVault(selectedUser.phone, { notes: nextNotes }, { timeout: 10000 })
+
+      setPrivateNotes(Array.isArray(response.data?.notes) ? response.data.notes : nextNotes)
+      setNotesVaultStatus("ready")
+    },
+    [notesVaultStatus, selectedUser, sender],
+  )
 
   useEffect(() => {
     messagesRef.current = messages
@@ -417,6 +525,106 @@ const Chat = () => {
       socketService.offPresenceUpdate(handlePresenceUpdate)
       socketService.offTypingUpdate(handleTypingUpdate)
     }
+  }, [selectedUser?.phone, sender])
+
+  useEffect(() => {
+    setIsNotesOpen(false)
+    setNotesVaultStatus("idle")
+    lockNotes()
+  }, [lockNotes, selectedUser?.phone])
+
+  useEffect(() => {
+    if (!isNotesOpen) {
+      lockNotes()
+      return
+    }
+    if (!selectedUser || !sender) return
+
+    let cancelled = false
+    const controller = new AbortController()
+
+    const loadNotesVault = async () => {
+      setNotesVaultStatus("loading")
+      setNotesLoadError(null)
+
+      try {
+        const response = await getPrivateNotesVault(selectedUser.phone, {
+          signal: controller.signal,
+          timeout: 8000,
+        })
+        if (cancelled) return
+        setPrivateNotes(Array.isArray(response.data?.notes) ? response.data.notes : [])
+        setNotesVaultStatus("ready")
+      } catch (error: unknown) {
+        if (cancelled) return
+
+        if (isRequestTimeoutError(error)) {
+          setNotesVaultStatus("idle")
+          setNotesLoadError("Notes request timed out. Check the API endpoint and try again.")
+          return
+        }
+
+        if (getErrorStatus(error) === 404) {
+          setPrivateNotes([])
+          setNotesVaultStatus("idle")
+          return
+        }
+
+        setPrivateNotes([])
+        setNotesVaultStatus("idle")
+        setNotesLoadError(getErrorMessage(error, "Failed to load notes."))
+      }
+    }
+
+    void loadNotesVault()
+
+    return () => {
+      cancelled = true
+      controller.abort()
+    }
+  }, [isNotesOpen, lockNotes, notesLoadAttempt, selectedUser?.phone, sender])
+
+  useEffect(() => {
+    if (!isNotesOpen) return
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setIsNotesOpen(false)
+    }
+
+    window.addEventListener("keydown", onKeyDown)
+    return () => window.removeEventListener("keydown", onKeyDown)
+  }, [isNotesOpen])
+
+  useEffect(() => {
+    if (!isNotesOpen || notesVaultStatus !== "ready" || !sender || !selectedUser) return
+
+    window.dispatchEvent(
+      new CustomEvent(NOTES_REMINDER_SYNC_EVENT, {
+        detail: {
+          scopeKey: `${sender}:${selectedUser.phone}`,
+          ownerPhone: sender,
+          targetUserPhone: selectedUser.phone,
+          notes: privateNotes,
+        },
+      }),
+    )
+  }, [isNotesOpen, notesVaultStatus, privateNotes, selectedUser?.phone, sender])
+
+  useEffect(() => {
+    if (!sender || !selectedUser) return
+
+    const scopeKey = `${sender}:${selectedUser.phone}`
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as
+        | { scopeKey?: string; notes?: PrivateNote[] }
+        | undefined
+
+      if (!detail || detail.scopeKey !== scopeKey || !Array.isArray(detail.notes)) return
+      setPrivateNotes(detail.notes)
+    }
+
+    window.addEventListener(NOTES_REMINDER_UPDATE_EVENT, handler)
+    return () => window.removeEventListener(NOTES_REMINDER_UPDATE_EVENT, handler)
   }, [selectedUser?.phone, sender])
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
@@ -553,6 +761,17 @@ const Chat = () => {
     window.addEventListener("keydown", onKeyDown)
     return () => window.removeEventListener("keydown", onKeyDown)
   }, [messageMenu])
+
+  useEffect(() => {
+    if (!isHeaderMenuOpen) return
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setIsHeaderMenuOpen(false)
+    }
+
+    window.addEventListener("keydown", onKeyDown)
+    return () => window.removeEventListener("keydown", onKeyDown)
+  }, [isHeaderMenuOpen])
 
   const getCopyTextForMessage = useCallback(
     (raw: string) => {
@@ -2014,9 +2233,125 @@ const Chat = () => {
     return items
   }, [filteredMessages])
 
+  const openNotesForSelectedUser = useCallback(() => {
+    if (!selectedUser) return
+    setIsHeaderMenuOpen(false)
+    setNotesVaultStatus("idle")
+    setNotesLoadError(null)
+    setNotesLoadAttempt((v) => v + 1)
+    setIsNotesOpen(true)
+  }, [selectedUser])
+
+  const closeNotesPanel = useCallback(() => {
+    setIsNotesOpen(false)
+  }, [])
+
+  const retryNotesVaultLoad = useCallback(() => {
+    setNotesVaultStatus("idle")
+    setNotesLoadError(null)
+    setNotesLoadAttempt((v) => v + 1)
+  }, [])
+
+  const handleSaveNote = useCallback(async () => {
+    const heading = noteHeadingInput.trim()
+    const content = noteContentInput.trim()
+    const reminderAt = noteReminderInput ? new Date(noteReminderInput).toISOString() : null
+
+    if (!heading) {
+      setNotesSaveError("Heading is required.")
+      return
+    }
+    if (!content) {
+      setNotesSaveError("Content is required.")
+      return
+    }
+
+    const now = new Date().toISOString()
+    const nextNotes = editingNoteId
+      ? privateNotes.map((note) =>
+          note.id === editingNoteId
+            ? {
+                ...note,
+                heading,
+                content,
+                reminderAt,
+                reminderSnoozedUntil: null,
+                reminderLastNotifiedAt: null,
+                updatedAt: now,
+              }
+            : note,
+        )
+      : [
+          {
+            id: crypto.randomUUID(),
+            heading,
+            content,
+            createdAt: now,
+            updatedAt: now,
+            reminderAt,
+            reminderSnoozedUntil: null,
+            reminderLastNotifiedAt: null,
+          },
+          ...privateNotes,
+        ]
+
+    setNotesPersisting(true)
+    setNotesSaveError(null)
+
+    try {
+      await persistPrivateNotes(nextNotes)
+      setPrivateNotes(nextNotes)
+      resetNotesEditor()
+    } catch (error: unknown) {
+      setNotesSaveError(
+        getErrorMessage(
+          error,
+          error instanceof Error && error.message ? error.message : "Failed to save note.",
+        ),
+      )
+    } finally {
+      setNotesPersisting(false)
+    }
+  }, [
+    editingNoteId,
+    noteContentInput,
+    noteHeadingInput,
+    noteReminderInput,
+    persistPrivateNotes,
+    privateNotes,
+    resetNotesEditor,
+  ])
+
+  const beginEditNote = useCallback((note: PrivateNote) => {
+    setEditingNoteId(note.id)
+    setNoteHeadingInput(note.heading)
+    setNoteContentInput(note.content)
+    setNoteReminderInput(toDateTimeLocalValue(getActiveReminderAt(note) || note.reminderAt))
+    setNotesSaveError(null)
+  }, [])
+
+  const handleDeleteNote = useCallback(async (noteId: string) => {
+    const nextNotes = privateNotes.filter((note) => note.id !== noteId)
+    setNotesPersisting(true)
+    setNotesSaveError(null)
+
+    try {
+      await persistPrivateNotes(nextNotes)
+      setPrivateNotes(nextNotes)
+      if (editingNoteId === noteId) {
+        resetNotesEditor()
+      }
+    } catch (error: unknown) {
+      setNotesSaveError(getErrorMessage(error, "Failed to delete note."))
+    } finally {
+      setNotesPersisting(false)
+    }
+  }, [editingNoteId, persistPrivateNotes, privateNotes, resetNotesEditor])
+
   const selectChatUser = useCallback(
     (user: User, { closeDrawer }: { closeDrawer?: boolean } = {}) => {
       stopTypingIndicator()
+      setIsHeaderMenuOpen(false)
       setSelectedUser(user)
       setReplyTo(null)
       setSelectedGifUrl(null)
@@ -2148,6 +2483,260 @@ const Chat = () => {
                 }}
               />
             </div>
+          </div>
+        </>
+      )}
+      {selectedUser && isNotesOpen && (
+        <>
+          <div
+            className="position-fixed top-0 start-0 w-100 h-100"
+            style={{ background: "rgba(0,0,0,0.45)", zIndex: 2050 }}
+            role="presentation"
+            onClick={closeNotesPanel}
+          />
+          <div
+            className="position-fixed top-50 start-50 translate-middle bg-body rounded shadow d-flex flex-column"
+            style={{
+              zIndex: 2051,
+              width: "min(92vw, 1080px)",
+              maxHeight: "88vh",
+              overflow: "hidden",
+            }}
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Private notes for ${selectedUser.name}`}
+          >
+            <div className="p-3 border-bottom d-flex align-items-start justify-content-between gap-3">
+              <div>
+                <div className="fw-semibold">Private Notes</div>
+                <div className="small text-body-secondary">
+                  Encrypted notes for {selectedUser.name}
+                </div>
+              </div>
+              <button
+                type="button"
+                className="btn btn-sm btn-outline-secondary"
+                onClick={closeNotesPanel}
+                aria-label="Close notes"
+                title="Close"
+              >
+                {"\u2715"}
+              </button>
+            </div>
+
+            {notesVaultStatus === "loading" ? (
+              <div className="p-4 text-body-secondary">Loading notes...</div>
+            ) : (
+              <div
+                className="d-flex flex-column flex-md-row"
+                style={{ minHeight: 0, flex: 1, overflow: "hidden" }}
+              >
+                <div
+                  className="border-end p-3"
+                  style={{
+                    width: isMobileLayout ? "100%" : "38%",
+                    minWidth: 0,
+                    overflowY: "auto",
+                  }}
+                >
+                  <div className="d-flex align-items-center justify-content-between gap-2 mb-3">
+                    <div className="fw-semibold">
+                      Notes ({filteredPrivateNotes.length})
+                    </div>
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-outline-secondary"
+                      onClick={resetNotesEditor}
+                    >
+                      New
+                    </button>
+                  </div>
+                  <div className="mb-3">
+                    <input
+                      type="search"
+                      className="form-control"
+                      value={notesSearchQuery}
+                      onChange={(e) => setNotesSearchQuery(e.target.value)}
+                      placeholder="Search by heading or content"
+                    />
+                  </div>
+                  {notesLoadError && (
+                    <div className="alert alert-danger py-2 mb-3">
+                      <div>{notesLoadError}</div>
+                      <button
+                        type="button"
+                        className="btn btn-sm btn-outline-danger mt-2"
+                        onClick={retryNotesVaultLoad}
+                      >
+                        Retry
+                      </button>
+                    </div>
+                  )}
+
+                  {filteredPrivateNotes.length === 0 ? (
+                    <div className="text-body-secondary small">
+                      {privateNotes.length === 0
+                        ? "No notes yet. Create your first private note."
+                        : "No notes match your search."}
+                    </div>
+                  ) : (
+                    <div className="d-flex flex-column gap-2">
+                      {filteredPrivateNotes.map((note) => (
+                        <button
+                          key={note.id}
+                          type="button"
+                          className="btn text-start border rounded p-3"
+                          onClick={() => beginEditNote(note)}
+                          style={{
+                            background:
+                              editingNoteId === note.id
+                                ? "var(--bs-primary-bg-subtle)"
+                                : "var(--bs-tertiary-bg)",
+                            borderColor:
+                              editingNoteId === note.id
+                                ? "var(--bs-primary-border-subtle)"
+                                : "var(--bs-border-color)",
+                            color:
+                              editingNoteId === note.id
+                                ? "var(--bs-primary-text-emphasis)"
+                                : "var(--bs-body-color)",
+                          }}
+                        >
+                          <div className="fw-semibold text-truncate">{note.heading}</div>
+                          <div
+                            className="small mt-1"
+                            style={{
+                              display: "-webkit-box",
+                              WebkitLineClamp: 3,
+                              WebkitBoxOrient: "vertical",
+                              overflow: "hidden",
+                              color:
+                                editingNoteId === note.id
+                                  ? "var(--bs-primary-text-emphasis)"
+                                  : "var(--bs-secondary-color)",
+                              opacity: editingNoteId === note.id ? 0.82 : 1,
+                            }}
+                          >
+                            {note.content}
+                          </div>
+                          <div
+                            className="small mt-2"
+                            style={{
+                              color:
+                                editingNoteId === note.id
+                                  ? "var(--bs-primary-text-emphasis)"
+                                  : "var(--bs-secondary-color)",
+                              opacity: editingNoteId === note.id ? 0.76 : 1,
+                            }}
+                          >
+                            Created {formatNoteDateTimeLabel(note.createdAt)}
+                          </div>
+                          <div
+                            className="small"
+                            style={{
+                              color:
+                                editingNoteId === note.id
+                                  ? "var(--bs-primary-text-emphasis)"
+                                  : "var(--bs-secondary-color)",
+                              opacity: editingNoteId === note.id ? 0.76 : 1,
+                            }}
+                          >
+                            Updated {formatNoteDateTimeLabel(note.updatedAt)}
+                          </div>
+                          {getActiveReminderAt(note) && (
+                            <div
+                              className="small mt-1"
+                              style={{
+                                color:
+                                  editingNoteId === note.id
+                                    ? "var(--bs-primary-text-emphasis)"
+                                    : "var(--bs-info-text-emphasis)",
+                                opacity: editingNoteId === note.id ? 0.84 : 1,
+                              }}
+                            >
+                              Reminder {formatNoteDateTimeLabel(getActiveReminderAt(note) || "")}
+                            </div>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex-grow-1 p-3 d-flex flex-column" style={{ minWidth: 0 }}>
+                  <div className="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
+                    <div className="fw-semibold">
+                      {editingNoteId ? "Edit note" : "Add note"}
+                    </div>
+                    <div className="d-flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        onClick={() => void handleSaveNote()}
+                        disabled={notesPersisting}
+                      >
+                        {notesPersisting ? "Saving..." : editingNoteId ? "Update note" : "Save note"}
+                      </button>
+                      {editingNoteId && (
+                        <button
+                          type="button"
+                          className="btn btn-outline-danger"
+                          onClick={() => void handleDeleteNote(editingNoteId)}
+                          disabled={notesPersisting}
+                        >
+                          Delete
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="btn btn-outline-secondary"
+                        onClick={resetNotesEditor}
+                        disabled={notesPersisting}
+                      >
+                        {editingNoteId ? "Cancel edit" : "Clear"}
+                      </button>
+                    </div>
+                  </div>
+
+                  {notesSaveError && <div className="alert alert-danger py-2">{notesSaveError}</div>}
+
+                  <div className="mb-3">
+                    <label className="form-label">Heading</label>
+                    <input
+                      type="text"
+                      className="form-control"
+                      value={noteHeadingInput}
+                      onChange={(e) => setNoteHeadingInput(e.target.value)}
+                      placeholder="Note heading"
+                    />
+                  </div>
+
+                  <div className="mb-3">
+                    <label className="form-label">Reminder</label>
+                    <input
+                      type="datetime-local"
+                      className="form-control"
+                      value={noteReminderInput}
+                      onChange={(e) => setNoteReminderInput(e.target.value)}
+                    />
+                    <div className="form-text">
+                      Set a date and time for a reminder popup. Leave empty for no reminder.
+                    </div>
+                  </div>
+
+                  <div className="mb-3 flex-grow-1 d-flex flex-column">
+                    <label className="form-label">Content</label>
+                    <textarea
+                      className="form-control flex-grow-1"
+                      value={noteContentInput}
+                      onChange={(e) => setNoteContentInput(e.target.value)}
+                      placeholder="Write your private note"
+                      style={{ minHeight: 240, resize: "vertical" }}
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         </>
       )}
@@ -2283,7 +2872,14 @@ const Chat = () => {
                 >
                   {selectedUser.name}
                 </strong>
-                <div className="small text-body-secondary">
+                <div
+                  className="small text-body-secondary"
+                  style={{
+                    filter: privacyMode ? "blur(10px)" : undefined,
+                    cursor: privacyMode ? "pointer" : undefined,
+                    transition: privacyMode ? "filter 0.2s ease" : undefined,
+                  }}
+                >
                   {presenceLabel || "Offline"}
                 </div>
               </div>
@@ -2291,51 +2887,94 @@ const Chat = () => {
               "Select a user"
             )}
           </div>
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <button
-              type="button"
-              className={`btn btn-sm ${
-                isStarredPanelOpen ? "btn-warning" : "btn-outline-warning"
-              }`}
-              onClick={() => setIsStarredPanelOpen((v) => !v)}
-              title="Starred messages"
-              aria-label="Toggle starred messages panel"
-              disabled={!selectedUser}
-            >
-              Starred
-            </button>
-            <button
-              type="button"
-              className={`btn btn-sm ${
-                isSharedPanelOpen ? "btn-primary" : "btn-outline-primary"
-              }`}
-              onClick={() => setIsSharedPanelOpen((v) => !v)}
-              title="Media and files"
-              aria-label="Toggle media and files panel"
-              disabled={!selectedUser}
-            >
-              Media & Files
-            </button>
-            <button
-              type="button"
-              className="btn btn-sm btn-outline-primary"
-              onClick={() => startTicTacToe()}
-              title="Start Tic-Tac-Toe"
-              aria-label="Start Tic-Tac-Toe"
-            >
-              {"\u274C"}
-              {"\u2B55"}
-            </button>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", position: "relative" }}>
             <button
               type="button"
               className={`btn btn-sm ${
                 privacyMode ? "btn-warning" : "btn-outline-warning"
               }`}
               onClick={() => setPrivacyMode(!privacyMode)}
-              title={privacyMode ? "Privacy Mode: ON - Messages are blurred" : "Privacy Mode: OFF"}
+              title={privacyMode ? "Privacy mode on" : "Privacy mode off"}
+              aria-label={privacyMode ? "Privacy mode on" : "Privacy mode off"}
             >
-              {"\u{1F512}"} {privacyMode ? "Privacy: ON" : "Privacy: OFF"}
+              {"\u{1F512}"}
             </button>
+            <button
+              type="button"
+              className="btn btn-sm btn-outline-info"
+              onClick={openNotesForSelectedUser}
+              title="Private notes"
+              aria-label="Private notes"
+              disabled={!selectedUser}
+            >
+              {"\u{1F4DD}"}
+            </button>
+            <button
+              type="button"
+              className="btn btn-sm btn-outline-secondary"
+              onClick={() => setIsHeaderMenuOpen((v) => !v)}
+              title="More actions"
+              aria-label="More actions"
+              disabled={!selectedUser}
+            >
+              {"\u22EF"}
+            </button>
+            {isHeaderMenuOpen && selectedUser && (
+              <>
+                <div
+                  style={{ position: "fixed", inset: 0, zIndex: 1499 }}
+                  onClick={() => setIsHeaderMenuOpen(false)}
+                />
+                <div
+                  className="bg-body border rounded shadow-sm p-2"
+                  style={{
+                    position: "absolute",
+                    top: "calc(100% + 8px)",
+                    right: 0,
+                    zIndex: 1500,
+                    minWidth: 190,
+                  }}
+                >
+                  <div className="d-grid gap-2">
+                    <button
+                      type="button"
+                      className={`btn btn-sm ${
+                        isStarredPanelOpen ? "btn-warning" : "btn-outline-warning"
+                      }`}
+                      onClick={() => {
+                        setIsHeaderMenuOpen(false)
+                        setIsStarredPanelOpen((v) => !v)
+                      }}
+                    >
+                      Starred
+                    </button>
+                    <button
+                      type="button"
+                      className={`btn btn-sm ${
+                        isSharedPanelOpen ? "btn-primary" : "btn-outline-primary"
+                      }`}
+                      onClick={() => {
+                        setIsHeaderMenuOpen(false)
+                        setIsSharedPanelOpen((v) => !v)
+                      }}
+                    >
+                      Media & Files
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-outline-primary"
+                      onClick={() => {
+                        setIsHeaderMenuOpen(false)
+                        void startTicTacToe()
+                      }}
+                    >
+                      {"\u274C"}
+                      {"\u2B55"} Game
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
           </div>
         </div>
 
@@ -3247,6 +3886,7 @@ const Chat = () => {
                       width: 320,
                       maxWidth: "75vw",
                     }}
+                    onClick={(e) => e.stopPropagation()}
                   >
                     <EmojiPicker
                       height={340}
@@ -3790,7 +4430,7 @@ const Chat = () => {
                           <img
                             src={g.previewUrl ?? g.url}
                             alt="GIF option"
-                            style={{ width: "100%", height: 72, objectFit: "cover", borderRadius: 6 }}
+                            style={{ width: "100%", height: 108, objectFit: "cover", borderRadius: 6 }}
                             loading="lazy"
                           />
                           {privacyMode && <span className="sl-privacy-mask" />}
