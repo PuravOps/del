@@ -132,6 +132,12 @@ const getActiveReminderAt = (note: PrivateNote) => note.reminderSnoozedUntil || 
 const NOTES_REMINDER_SYNC_EVENT = "privateNotesReminderSessionSync"
 const NOTES_REMINDER_UPDATE_EVENT = "privateNotesReminderNotesUpdated"
 
+const dispatchUnreadCountsChanged = (
+  detail?: { kind?: "seen" | "refresh"; sender?: string | null; receiver?: string | null },
+) => {
+  window.dispatchEvent(new CustomEvent("unreadCountsChanged", { detail }))
+}
+
 const getErrorStatus = (error: unknown) => {
   const status = (error as { response?: { status?: unknown } } | null)?.response?.status
   return typeof status === "number" ? status : null
@@ -261,6 +267,7 @@ const Chat = () => {
   const [noteReminderInput, setNoteReminderInput] = useState("")
   const [notesSaveError, setNotesSaveError] = useState<string | null>(null)
   const [notesPersisting, setNotesPersisting] = useState(false)
+  const [isRefreshingChat, setIsRefreshingChat] = useState(false)
   const emojiContainerRef = useRef<HTMLDivElement | null>(null)
   const [pickerTheme, setPickerTheme] = useState<Theme>(() =>
     document.documentElement.getAttribute("data-bs-theme") === "dark" ? Theme.DARK : Theme.LIGHT,
@@ -1450,8 +1457,8 @@ const Chat = () => {
 
       const isCurrentThread = Boolean(
         selectedUser &&
-          ((msg.sender === sender && msg.receiver === selectedUser.phone) ||
-            (msg.sender === selectedUser.phone && msg.receiver === sender)),
+          ((isSameUserId(msg.sender, sender) && isSameUserId(msg.receiver, selectedUser.phone)) ||
+            (isSameUserId(msg.sender, selectedUser.phone) && isSameUserId(msg.receiver, sender))),
       )
       // eslint-disable-next-line no-console
       console.info("Chat.isCurrentThread", isCurrentThread)
@@ -1474,24 +1481,24 @@ const Chat = () => {
         })
       }
 
-      if (msg.receiver !== sender) return
+      if (!isSameUserId(msg.receiver, sender)) return
 
       const from = msg.sender
 
-      const isSelectedThread = selectedUser?.phone === from
+      const isSelectedThread = isSameUserId(selectedUser?.phone ?? "", from)
 
       if (!isSelectedThread || !isPageActive) {
         setUnreadCounts((prev) => ({
           ...prev,
           [from]: (prev[from] ?? 0) + 1,
         }))
-        window.dispatchEvent(new Event("unreadCountsChanged"))
+        dispatchUnreadCountsChanged({ kind: "refresh", sender: from, receiver: sender })
         return
       }
 
       setUnreadCounts((prev) => ({ ...prev, [from]: 0 }))
       socketService.markSeen({ sender: from, receiver: sender })
-      window.dispatchEvent(new Event("unreadCountsChanged"))
+      dispatchUnreadCountsChanged({ kind: "seen", sender: from, receiver: sender })
     }
 
     socketService.onReceiveMessage(handleReceive)
@@ -1528,13 +1535,13 @@ const Chat = () => {
           ...prev,
           [other]: (prev[other] ?? 0) + 1,
         }))
-        window.dispatchEvent(new Event("unreadCountsChanged"))
+        dispatchUnreadCountsChanged({ kind: "refresh", sender: other, receiver: sender })
         return
       }
 
       setUnreadCounts((prev) => ({ ...prev, [other]: 0 }))
       socketService.markSeen({ sender: other, receiver: sender })
-      window.dispatchEvent(new Event("unreadCountsChanged"))
+      dispatchUnreadCountsChanged({ kind: "seen", sender: other, receiver: sender })
     }
 
     socketService.onGameUpdated(handleGameUpdate)
@@ -1735,7 +1742,7 @@ const Chat = () => {
       }
 
       setUnreadCounts(next)
-      window.dispatchEvent(new Event("unreadCountsChanged"))
+      dispatchUnreadCountsChanged({ kind: "refresh", receiver: sender })
     } catch (e) {
       console.error("Failed to load unseen counts", e)
     }
@@ -1755,41 +1762,41 @@ const Chat = () => {
     void refreshUnseenCounts()
   }, [refreshUnseenCounts])
 
-  useEffect(() => {
+  const reloadSelectedThread = useCallback(async () => {
     if (!selectedUser || !sender) return
 
-    const loadThread = async () => {
-      try {
-        setIsLoadingMore(true)
-        setHasMore(false)
-        oldestCursorRef.current = null
-        setMessages([])
+    try {
+      setIsLoadingMore(true)
+      setHasMore(false)
+      oldestCursorRef.current = null
+      setMessages([])
 
-        const res = await getMessages(sender, selectedUser.phone, { limit: PAGE_SIZE })
-        const rows = Array.isArray(res.data) ? (res.data as MessageResponse[]) : []
+      const res = await getMessages(sender, selectedUser.phone, { limit: PAGE_SIZE })
+      const rows = Array.isArray(res.data) ? (res.data as MessageResponse[]) : []
 
-        const sorted = [...rows].sort(
-          (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
-        )
+      const sorted = [...rows].sort(
+        (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
+      )
 
-        const page = sorted.length > PAGE_SIZE ? sorted.slice(sorted.length - PAGE_SIZE) : sorted
+      const page = sorted.length > PAGE_SIZE ? sorted.slice(sorted.length - PAGE_SIZE) : sorted
 
-        setMessages(page)
-        oldestCursorRef.current = page[0]?.createdAt ?? null
-        setHasMore(sorted.length > PAGE_SIZE ? true : rows.length >= PAGE_SIZE)
+      setMessages(page)
+      oldestCursorRef.current = page[0]?.createdAt ?? null
+      setHasMore(sorted.length > PAGE_SIZE ? true : rows.length >= PAGE_SIZE)
 
-        window.requestAnimationFrame(() => {
-          scrollToBottom("auto")
-        })
-      } catch (e) {
-        console.error("Failed to load messages", e)
-      } finally {
-        setIsLoadingMore(false)
-      }
+      window.requestAnimationFrame(() => {
+        scrollToBottom("auto")
+      })
+    } catch (e) {
+      console.error("Failed to load messages", e)
+    } finally {
+      setIsLoadingMore(false)
     }
-
-    loadThread()
   }, [selectedUser, sender, scrollToBottom])
+
+  useEffect(() => {
+    void reloadSelectedThread()
+  }, [reloadSelectedThread])
 
   const loadMore = useCallback(async () => {
     if (!selectedUser || !sender) return
@@ -1874,7 +1881,7 @@ const Chat = () => {
     const seenAt = new Date().toISOString()
     socketService.markSeen({ sender: selectedUser.phone, receiver: sender })
     setUnreadCounts((prev) => ({ ...prev, [selectedUser.phone]: 0 }))
-    window.dispatchEvent(new Event("unreadCountsChanged"))
+    dispatchUnreadCountsChanged({ kind: "seen", sender: selectedUser.phone, receiver: sender })
     setMessages((prev) =>
       prev.map((m) =>
         m.sender === selectedUser.phone && m.receiver === sender
@@ -1904,7 +1911,7 @@ const Chat = () => {
       socketService.sendMessage(payload)
       setUnreadCounts((prev) => ({ ...prev, [receiverPhone]: 0 }))
       socketService.markSeen({ sender: receiverPhone, receiver: sender })
-      window.dispatchEvent(new Event("unreadCountsChanged"))
+      dispatchUnreadCountsChanged({ kind: "seen", sender: receiverPhone, receiver: sender })
 
       const isCurrentThread = selectedUser?.phone === receiverPhone
       if (opts?.clearInput && isCurrentThread) setInput("")
@@ -2252,6 +2259,20 @@ const Chat = () => {
     setNotesLoadAttempt((v) => v + 1)
   }, [])
 
+  const refreshChatState = useCallback(async () => {
+    setIsRefreshingChat(true)
+    try {
+      await Promise.all([
+        loadUsers(),
+        refreshUnseenCounts(),
+        selectedUser ? reloadSelectedThread() : Promise.resolve(),
+      ])
+      dispatchUnreadCountsChanged({ kind: "refresh", receiver: sender })
+    } finally {
+      setIsRefreshingChat(false)
+    }
+  }, [refreshUnseenCounts, reloadSelectedThread, selectedUser, sender])
+
   const handleSaveNote = useCallback(async () => {
     const heading = noteHeadingInput.trim()
     const content = noteContentInput.trim()
@@ -2361,7 +2382,7 @@ const Chat = () => {
       if (sender) {
         setUnreadCounts((prev) => ({ ...prev, [user.phone]: 0 }))
         socketService.markSeen({ sender: user.phone, receiver: sender })
-        window.dispatchEvent(new Event("unreadCountsChanged"))
+        dispatchUnreadCountsChanged({ kind: "seen", sender: user.phone, receiver: sender })
       }
     },
     [sender, stopTypingIndicator],
@@ -2908,6 +2929,16 @@ const Chat = () => {
               disabled={!selectedUser}
             >
               {"\u{1F4DD}"}
+            </button>
+            <button
+              type="button"
+              className="btn btn-sm btn-outline-primary"
+              onClick={() => void refreshChatState()}
+              title="Refresh chats and notifications"
+              aria-label="Refresh chats and notifications"
+              disabled={isRefreshingChat}
+            >
+              {isRefreshingChat ? "..." : "\u21BB"}
             </button>
             <button
               type="button"

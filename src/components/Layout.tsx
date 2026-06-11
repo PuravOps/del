@@ -46,11 +46,16 @@ const formatReminderDateTime = (iso: string) => {
 const getActiveReminderAt = (note: PrivateNote) =>
   note.reminderSnoozedUntil || note.reminderAt || null;
 
+const getUnreadChangedDetail = (event: Event) =>
+  (event as CustomEvent).detail as
+    | { kind?: "seen" | "refresh"; sender?: string | null; receiver?: string | null }
+    | undefined;
+
 const Layout = ({ children }: Props) => {
   const token = localStorage.getItem("token");
   const userPhone = localStorage.getItem("userPhone") || "";
   const userName = localStorage.getItem("userName") || "";
-  const [unreadTotal, setUnreadTotal] = useState(0);
+  const [unreadBySender, setUnreadBySender] = useState<Record<string, number>>({});
   const [gameNotifyTotal, setGameNotifyTotal] = useState(0);
   const [theme, setTheme] = useState<"dark" | "light">(() => {
     const stored = localStorage.getItem("theme");
@@ -68,6 +73,12 @@ const Layout = ({ children }: Props) => {
   const [activeChatPhone, setActiveChatPhone] = useState<string | null>(null);
   const [isActiveChatThread, setIsActiveChatThread] = useState(false);
   const reminderTimerRef = useRef<number | null>(null);
+  const latestChatStateRef = useRef({
+    activeChatPhone: null as string | null,
+    isActiveChatThread: false,
+    isPageActive: false,
+    pathname: "",
+  });
 
   const normalizeId = (v: string) => v.trim().replace(/[^\d+]/g, "");
   const toDigits = (v: string) => v.replace(/\D/g, "");
@@ -109,6 +120,19 @@ const Layout = ({ children }: Props) => {
   };
 
   const noteReminderTotal = activeReminderPopups.length;
+  const unreadTotal = useMemo(
+    () => Object.values(unreadBySender).reduce((total, count) => total + Math.max(0, Number(count) || 0), 0),
+    [unreadBySender],
+  );
+
+  useEffect(() => {
+    latestChatStateRef.current = {
+      activeChatPhone,
+      isActiveChatThread,
+      isPageActive,
+      pathname: location.pathname,
+    };
+  }, [activeChatPhone, isActiveChatThread, isPageActive, location.pathname]);
 
   const syncReminderNotesToChat = useCallback((session: ReminderSession) => {
     window.dispatchEvent(
@@ -266,8 +290,13 @@ const Layout = ({ children }: Props) => {
       const rows = Array.isArray(res.data)
         ? (res.data as Array<{ sender: string; count: number }>)
         : [];
-      const total = rows.reduce((acc, row) => acc + Number(row.count ?? 0), 0);
-      setUnreadTotal(total);
+      const next: Record<string, number> = {};
+      for (const row of rows) {
+        if (!row.sender) continue;
+        const count = Number(row.count ?? 0);
+        if (count > 0) next[row.sender] = count;
+      }
+      setUnreadBySender(next);
     } catch (e) {
       console.error("Failed to load unseen counts", e);
     }
@@ -277,7 +306,10 @@ const Layout = ({ children }: Props) => {
     if (!token || !userPhone) return;
 
     socketService.connect(userPhone);
-    const onConn = () => setSocketConnected(true);
+    const onConn = () => {
+      setSocketConnected(true);
+      void refreshUnseenTotal();
+    };
     const onDisc = () => setSocketConnected(false);
     socketService.onConnect(onConn);
     socketService.onDisconnect(onDisc);
@@ -335,22 +367,30 @@ const Layout = ({ children }: Props) => {
   useEffect(() => {
     if (!token || !userPhone) return;
 
-    const onReceive = (msg: MessageResponse) => {
-      if (msg.receiver !== userPhone) return;
+    const isActivelyViewingSender = (senderPhone: string) => {
+      const latest = latestChatStateRef.current;
+      return (
+        latest.isPageActive &&
+        latest.pathname === "/chat" &&
+        latest.isActiveChatThread &&
+        isSameUserId(latest.activeChatPhone ?? "", senderPhone)
+      );
+    };
 
-      if (
-        isPageActive &&
-        location.pathname === "/chat" &&
-        isActiveChatThread &&
-        activeChatPhone === msg.sender
-      ) {
+    const onReceive = (msg: MessageResponse) => {
+      if (!isSameUserId(msg.receiver ?? "", userPhone)) return;
+
+      if (isActivelyViewingSender(msg.sender)) {
         return;
       }
 
-      const delayMs = isPageActive ? 350 : 0;
+      setUnreadBySender((prev) => ({
+        ...prev,
+        [msg.sender]: (prev[msg.sender] ?? 0) + 1,
+      }));
       window.setTimeout(() => {
         void refreshUnseenTotal();
-      }, delayMs);
+      }, 350);
     };
 
     socketService.onReceiveMessage(onReceive);
@@ -360,21 +400,15 @@ const Layout = ({ children }: Props) => {
 
       const other = getOtherPartyForGameMessage(msg);
 
-      if (
-        isPageActive &&
-        location.pathname === "/chat" &&
-        isActiveChatThread &&
-        isSameUserId(activeChatPhone ?? "", other)
-      ) {
+      if (isActivelyViewingSender(other)) {
         return;
       }
 
       setGameNotifyTotal((prev) => prev + 1);
 
-      const delayMs = isPageActive ? 350 : 0;
       window.setTimeout(() => {
         void refreshUnseenTotal();
-      }, delayMs);
+      }, 350);
     };
 
     socketService.onGameCreated(onGame);
@@ -389,25 +423,33 @@ const Layout = ({ children }: Props) => {
     token,
     userPhone,
     refreshUnseenTotal,
-    isPageActive,
-    location.pathname,
-    isActiveChatThread,
-    activeChatPhone,
   ]);
 
   useEffect(() => {
-    const handler = () => {
-      const delayMs = isPageActive && location.pathname === "/chat" ? 350 : 0;
+    const handler = (event: Event) => {
+      const detail = getUnreadChangedDetail(event);
+      if (detail?.kind === "seen" && detail.sender) {
+        setUnreadBySender((prev) => {
+          const next = { ...prev };
+          for (const key of Object.keys(next)) {
+            if (isSameUserId(key, detail.sender ?? "")) {
+              delete next[key];
+            }
+          }
+          return next;
+        });
+      }
+
       window.setTimeout(() => {
         void refreshUnseenTotal();
-      }, delayMs);
+      }, 350);
     };
 
     window.addEventListener("unreadCountsChanged", handler);
     return () => {
       window.removeEventListener("unreadCountsChanged", handler);
     };
-  }, [refreshUnseenTotal, isPageActive, location.pathname]);
+  }, [refreshUnseenTotal]);
 
   useEffect(() => {
     if (reminderTimerRef.current) {
