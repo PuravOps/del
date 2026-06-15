@@ -1,5 +1,5 @@
 ﻿import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react"
-import type { ClipboardEvent, ChangeEvent } from "react"
+import type { ClipboardEvent, ChangeEvent, CSSProperties, Dispatch, MutableRefObject, SetStateAction } from "react"
 import {
   getMessages,
   getUnseenCounts,
@@ -14,6 +14,8 @@ import {
   getChatLinks,
   setMessageStarred,
   getChatStarredMessages,
+  setMessagePinned,
+  getChatPinnedMessages,
   getPrivateNotesVault,
   createPrivateNotesVault,
   updatePrivateNotesVault,
@@ -40,13 +42,22 @@ import {
 } from "../utils/richChatMessage"
 import { extractSharedContent, isGifUrl } from "../utils/chatSharedContent"
 import type { User, UserPresenceResponse } from "../types/user.types"
-import type { PresenceUpdatePayload, TypingUpdatePayload } from "../services/socket"
+import type { ChatEffectKind, ChatEffectPayload, PresenceUpdatePayload, TypingUpdatePayload } from "../services/socket"
 import type { PrivateNote } from "../types/privateNotes.types"
 
 const PAGE_SIZE = 30
 const TYPING_STOP_DELAY_MS = 1200
 const EMPTY_SHARED_CONTENT: SharedContentCollection = { media: [], files: [], links: [] }
 const STARRED_STORAGE_PREFIX = "sl-starred-messages:"
+const MAX_PINNED_MESSAGES = 3
+const CONFETTI_COLORS = ["#ff4d6d", "#ffd166", "#06d6a0", "#118ab2", "#8338ec", "#fb8500"]
+const CONFETTI_CANNON_COUNT = 36
+const CONFETTI_RAIN_COUNT = 30
+const PUNCH_IMPACT_COUNT = 16
+const LOVE_HEART_COUNT = 34
+
+const createChatEffectEventId = () =>
+  `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
 
 const formatTimeLabel = (iso: string) => {
   const d = new Date(iso)
@@ -254,6 +265,9 @@ const Chat = () => {
   const [starredMessages, setStarredMessages] = useState<MessageResponse[]>([])
   const [starredMessagesLoading, setStarredMessagesLoading] = useState(false)
   const [starredMessagesNotice, setStarredMessagesNotice] = useState<string | null>(null)
+  const [pinnedMessageIds, setPinnedMessageIds] = useState<string[]>([])
+  const [pinnedMessages, setPinnedMessages] = useState<MessageResponse[]>([])
+  const [pinnedMessagesNotice, setPinnedMessagesNotice] = useState<string | null>(null)
   const [selectedUserPresence, setSelectedUserPresence] = useState<UserPresenceResponse | null>(null)
   const [isNotesOpen, setIsNotesOpen] = useState(false)
   const [notesVaultStatus, setNotesVaultStatus] = useState<"idle" | "loading" | "ready">("idle")
@@ -268,6 +282,9 @@ const Chat = () => {
   const [notesSaveError, setNotesSaveError] = useState<string | null>(null)
   const [notesPersisting, setNotesPersisting] = useState(false)
   const [isRefreshingChat, setIsRefreshingChat] = useState(false)
+  const [confettiRunId, setConfettiRunId] = useState(0)
+  const [punchRunId, setPunchRunId] = useState(0)
+  const [loveRunId, setLoveRunId] = useState(0)
   const emojiContainerRef = useRef<HTMLDivElement | null>(null)
   const [pickerTheme, setPickerTheme] = useState<Theme>(() =>
     document.documentElement.getAttribute("data-bs-theme") === "dark" ? Theme.DARK : Theme.LIGHT,
@@ -285,6 +302,10 @@ const Chat = () => {
   const typingStopTimerRef = useRef<number | null>(null)
   const typingActiveTargetRef = useRef<string | null>(null)
   const lastHeartbeatAtRef = useRef(0)
+  const confettiTimerRef = useRef<number | null>(null)
+  const punchTimerRef = useRef<number | null>(null)
+  const loveTimerRef = useRef<number | null>(null)
+  const localChatEffectEventIdsRef = useRef<Set<string>>(new Set())
 
   const sender = localStorage.getItem("userPhone") || ""
   const isPageActive = usePageActivity()
@@ -653,10 +674,71 @@ const Chat = () => {
     }, 1600)
   }, [])
 
+  const triggerChatEffect = useCallback((
+    setRunId: Dispatch<SetStateAction<number>>,
+    timerRef: MutableRefObject<number | null>,
+    durationMs: number,
+  ) => {
+    setRunId((prev) => prev + 1)
+    if (timerRef.current) window.clearTimeout(timerRef.current)
+    timerRef.current = window.setTimeout(() => {
+      setRunId(0)
+      timerRef.current = null
+    }, durationMs)
+  }, [])
+
+  const playChatEffect = useCallback((effect: ChatEffectKind) => {
+    if (effect === "confetti") {
+      triggerChatEffect(setConfettiRunId, confettiTimerRef, 2600)
+      return
+    }
+    if (effect === "punch") {
+      triggerChatEffect(setPunchRunId, punchTimerRef, 1200)
+      return
+    }
+    triggerChatEffect(setLoveRunId, loveTimerRef, 2600)
+  }, [triggerChatEffect])
+
+  const sendChatEffect = useCallback(
+    (effect: ChatEffectKind) => {
+      if (!sender || !selectedUser) return
+
+      const eventId = createChatEffectEventId()
+      localChatEffectEventIdsRef.current.add(eventId)
+      window.setTimeout(() => {
+        localChatEffectEventIdsRef.current.delete(eventId)
+      }, 5000)
+
+      playChatEffect(effect)
+      socketService.sendChatEffect({
+        sender,
+        receiver: selectedUser.phone,
+        effect,
+        eventId,
+      })
+    },
+    [playChatEffect, selectedUser, sender],
+  )
+
+  const triggerConfetti = useCallback(() => {
+    sendChatEffect("confetti")
+  }, [sendChatEffect])
+
+  const triggerPunch = useCallback(() => {
+    sendChatEffect("punch")
+  }, [sendChatEffect])
+
+  const triggerLove = useCallback(() => {
+    sendChatEffect("love")
+  }, [sendChatEffect])
+
   useEffect(() => {
     return () => {
       if (highlightTimerRef.current) window.clearTimeout(highlightTimerRef.current)
       if (typingStopTimerRef.current) window.clearTimeout(typingStopTimerRef.current)
+      if (confettiTimerRef.current) window.clearTimeout(confettiTimerRef.current)
+      if (punchTimerRef.current) window.clearTimeout(punchTimerRef.current)
+      if (loveTimerRef.current) window.clearTimeout(loveTimerRef.current)
     }
   }, [])
 
@@ -808,6 +890,7 @@ const Chat = () => {
     (m: MessageResponse, isOutgoing: boolean, e: MouseEvent<HTMLElement>) => {
       e.preventDefault()
       e.stopPropagation()
+      e.nativeEvent.stopImmediatePropagation()
 
       const MENU_W = 300
       const MENU_H = 64
@@ -826,11 +909,13 @@ const Chat = () => {
   )
 
   const handleMessageSecondaryClick = useCallback(
-    (m: MessageResponse, isOutgoing: boolean, e: MouseEvent<HTMLElement>) => {
+    (_m: MessageResponse, _isOutgoing: boolean, e: MouseEvent<HTMLElement>) => {
       if (e.button !== 2) return
-      openMessageMenu(m, isOutgoing, e)
+      e.preventDefault()
+      e.stopPropagation()
+      e.nativeEvent.stopImmediatePropagation()
     },
-    [openMessageMenu],
+    [],
   )
 
   useEffect(() => {
@@ -1120,6 +1205,55 @@ const Chat = () => {
   )
 
   const starredIdSet = useMemo(() => new Set(starredMessageIds), [starredMessageIds])
+  const pinnedIdSet = useMemo(() => new Set(pinnedMessageIds), [pinnedMessageIds])
+
+  const isMessagePinned = useCallback(
+    (message: MessageResponse) => Boolean(message.pinned || pinnedIdSet.has(message._id)),
+    [pinnedIdSet],
+  )
+
+  const visiblePinnedMessages = useMemo(() => {
+    const unique = new Map<string, MessageResponse>()
+    for (const message of pinnedMessages) {
+      if (!message.isDeleted && isMessagePinned(message)) unique.set(message._id, message)
+    }
+    for (const message of filteredMessages) {
+      if (!message.isDeleted && isMessagePinned(message)) unique.set(message._id, message)
+    }
+
+    return Array.from(unique.values())
+      .sort((a, b) => {
+        const at = new Date(a.pinnedAt ?? a.createdAt).getTime()
+        const bt = new Date(b.pinnedAt ?? b.createdAt).getTime()
+        return bt - at
+      })
+      .slice(0, MAX_PINNED_MESSAGES)
+  }, [filteredMessages, isMessagePinned, pinnedMessages])
+
+  const applyPinnedMessageToCurrentThread = useCallback((message: MessageResponse) => {
+    setPinnedMessageIds((prev) => {
+      if (message.pinned) {
+        return prev.includes(message._id)
+          ? prev
+          : [message._id, ...prev].slice(0, MAX_PINNED_MESSAGES)
+      }
+      return prev.filter((id) => id !== message._id)
+    })
+
+    setPinnedMessages((prev) => {
+      if (message.pinned && !message.isDeleted) {
+        const next = [message, ...prev.filter((item) => item._id !== message._id)]
+        next.sort((a, b) => {
+          const at = new Date(a.pinnedAt ?? a.createdAt).getTime()
+          const bt = new Date(b.pinnedAt ?? b.createdAt).getTime()
+          return bt - at
+        })
+        return next.slice(0, MAX_PINNED_MESSAGES)
+      }
+
+      return prev.filter((item) => item._id !== message._id)
+    })
+  }, [])
 
   const derivedSharedContent = useMemo(
     () => extractSharedContent(filteredMessages),
@@ -1179,6 +1313,29 @@ const Chat = () => {
     return all
   }, [filteredMessages, selectedUser, sender])
 
+  const openPinnedMessage = useCallback(
+    async (message: MessageResponse) => {
+      if (!messageElByIdRef.current[message._id]) {
+        try {
+          const fullThread = await loadFullThreadMessages()
+          setMessages((prev) => {
+            const unique = new Map(prev.map((item) => [item._id, item]))
+            fullThread.forEach((item) => unique.set(item._id, item))
+            return Array.from(unique.values())
+          })
+        } catch {
+          setPinnedMessagesNotice("Could not load the pinned message.")
+          return
+        }
+      }
+
+      window.requestAnimationFrame(() => {
+        scrollToMessage(message._id)
+      })
+    },
+    [loadFullThreadMessages, scrollToMessage],
+  )
+
   const isMessageStarred = useCallback(
     (message: MessageResponse) => Boolean(message.starred || starredIdSet.has(message._id)),
     [starredIdSet],
@@ -1234,6 +1391,46 @@ const Chat = () => {
     if (!starredStorageKey) return
     localStorage.setItem(starredStorageKey, JSON.stringify(starredMessageIds))
   }, [starredMessageIds, starredStorageKey])
+
+  useEffect(() => {
+    if (!selectedUser || !sender) {
+      setPinnedMessageIds([])
+      setPinnedMessages([])
+      setPinnedMessagesNotice(null)
+      return
+    }
+
+    let cancelled = false
+    const chatId = [sender, selectedUser.phone].sort().join("_")
+
+    const loadPinnedMessages = async () => {
+      try {
+        const res = await getChatPinnedMessages(chatId, {
+          user1: sender,
+          user2: selectedUser.phone,
+        })
+        if (cancelled) return
+
+        const rows = Array.isArray(res.data) ? (res.data as MessageResponse[]) : []
+        const pinnedRows = rows.filter((message) => message.pinned && !message.isDeleted)
+        setPinnedMessages(pinnedRows)
+        setPinnedMessageIds(pinnedRows.map((message) => message._id))
+        setPinnedMessagesNotice(null)
+      } catch {
+        if (!cancelled) {
+          setPinnedMessages([])
+          setPinnedMessageIds([])
+          setPinnedMessagesNotice("Pinned messages are unavailable until the API is updated.")
+        }
+      }
+    }
+
+    void loadPinnedMessages()
+
+    return () => {
+      cancelled = true
+    }
+  }, [selectedUser, sender])
 
   useEffect(() => {
     if (!selectedUser) {
@@ -1585,8 +1782,40 @@ const Chat = () => {
   useEffect(() => {
     if (!sender) return
 
+    const handleChatEffect = (payload: ChatEffectPayload) => {
+      if (!selectedUser) return
+      if (payload.eventId && localChatEffectEventIdsRef.current.has(payload.eventId)) return
+
+      const isCurrentThread =
+        (isSameUserId(payload.sender, sender) && isSameUserId(payload.receiver, selectedUser.phone)) ||
+        (isSameUserId(payload.sender, selectedUser.phone) && isSameUserId(payload.receiver, sender)) ||
+        (isSameUserId(payload.receiver, sender) && isSameUserId(payload.sender, selectedUser.phone))
+
+      if (!isCurrentThread) {
+        console.info("Ignoring chatEffect for inactive thread", {
+          payload,
+          sender,
+          selectedUserPhone: selectedUser.phone,
+        })
+        return
+      }
+      playChatEffect(payload.effect)
+    }
+
+    socketService.onChatEffect(handleChatEffect)
+
+    return () => {
+      socketService.offChatEffect(handleChatEffect)
+    }
+  }, [playChatEffect, selectedUser, sender])
+
+  useEffect(() => {
+    if (!sender) return
+
     const handleMessageDeleted = (payload: { messageId: string }) => {
       setMessages((prev) => prev.filter((m) => m._id !== payload.messageId))
+      setPinnedMessageIds((prev) => prev.filter((id) => id !== payload.messageId))
+      setPinnedMessages((prev) => prev.filter((message) => message._id !== payload.messageId))
     }
 
     socketService.onMessageDeleted(handleMessageDeleted)
@@ -1614,6 +1843,33 @@ const Chat = () => {
       socketService.offMessageUpdated(handleMessageUpdated)
     }
   }, [sender])
+
+  useEffect(() => {
+    if (!sender) return
+
+    const handleMessagePinned = (payload: { message: MessageResponse }) => {
+      const message = payload.message
+      setMessages((prev) =>
+        prev.map((item) => (item._id === message._id ? { ...item, ...message } : item)),
+      )
+
+      if (!selectedUser) return
+      const isCurrentThread =
+        (message.sender === sender && message.receiver === selectedUser.phone) ||
+        (message.sender === selectedUser.phone && message.receiver === sender)
+
+      if (isCurrentThread) {
+        applyPinnedMessageToCurrentThread(message)
+        setPinnedMessagesNotice(null)
+      }
+    }
+
+    socketService.onMessagePinned(handleMessagePinned)
+
+    return () => {
+      socketService.offMessagePinned(handleMessagePinned)
+    }
+  }, [applyPinnedMessageToCurrentThread, selectedUser, sender])
 
   useEffect(() => {
     if (!sender) return
@@ -2219,6 +2475,56 @@ const Chat = () => {
       }
     },
     [isMessageStarred],
+  )
+
+  const togglePinMessage = useCallback(
+    async (message: MessageResponse) => {
+      if (!sender) return
+
+      const nextPinned = !isMessagePinned(message)
+      if (nextPinned && visiblePinnedMessages.length >= MAX_PINNED_MESSAGES) {
+        setPinnedMessagesNotice(`You can pin up to ${MAX_PINNED_MESSAGES} messages in this chat.`)
+        return
+      }
+
+      const optimisticMessage: MessageResponse = {
+        ...message,
+        pinned: nextPinned,
+        pinnedAt: nextPinned ? new Date().toISOString() : null,
+        pinnedBy: nextPinned ? sender : null,
+      }
+
+      setMessages((prev) =>
+        prev.map((item) =>
+          item._id === optimisticMessage._id ? { ...item, ...optimisticMessage } : item,
+        ),
+      )
+      applyPinnedMessageToCurrentThread(optimisticMessage)
+      setPinnedMessagesNotice(null)
+
+      try {
+        const res = await setMessagePinned(message._id, nextPinned, sender)
+        const updated = res.data as MessageResponse
+        setMessages((prev) =>
+          prev.map((item) => (item._id === updated._id ? { ...item, ...updated } : item)),
+        )
+        applyPinnedMessageToCurrentThread(updated)
+        socketService.pinMessage(updated._id)
+      } catch (error) {
+        setMessages((prev) =>
+          prev.map((item) => (item._id === message._id ? { ...item, ...message } : item)),
+        )
+        applyPinnedMessageToCurrentThread(message)
+
+        let notice = "Could not update pinned message."
+        if (axios.isAxiosError(error)) {
+          const apiMessage = (error.response?.data as { message?: string } | undefined)?.message
+          if (apiMessage) notice = apiMessage
+        }
+        setPinnedMessagesNotice(notice)
+      }
+    },
+    [applyPinnedMessageToCurrentThread, isMessagePinned, sender, visiblePinnedMessages.length],
   )
 
   const messageItems = useMemo(() => {
@@ -2861,7 +3167,90 @@ const Chat = () => {
       )}
 
       {/* RIGHT SIDE - CHAT AREA */}
-      <div className="flex-grow-1 d-flex flex-column">
+      <div className="flex-grow-1 d-flex flex-column position-relative">
+        {confettiRunId > 0 && (
+          <div className="sl-confetti-layer" aria-hidden="true" key={confettiRunId}>
+            {Array.from({ length: CONFETTI_CANNON_COUNT }).map((_, index) => {
+              const fromLeft = index % 2 === 0
+              const spread = 12 + (index % 9) * 6
+              const rise = 36 + (index % 7) * 7
+              return (
+                <span
+                  key={`cannon-${index}`}
+                  className={`sl-confetti-piece sl-confetti-cannon ${
+                    fromLeft ? "sl-confetti-cannon-left" : "sl-confetti-cannon-right"
+                  }`}
+                  style={
+                    {
+                      "--sl-confetti-delay": `${(index % 10) * 0.025}s`,
+                      "--sl-confetti-duration": `${1.25 + (index % 6) * 0.12}s`,
+                      "--sl-confetti-x": `${fromLeft ? spread : -spread}vw`,
+                      "--sl-confetti-rise": `-${rise}vh`,
+                      "--sl-confetti-rotate": `${(index * 47) % 360}deg`,
+                      "--sl-confetti-color": CONFETTI_COLORS[index % CONFETTI_COLORS.length],
+                    } as CSSProperties
+                  }
+                />
+              )
+            })}
+            {Array.from({ length: CONFETTI_RAIN_COUNT }).map((_, index) => (
+              <span
+                key={`rain-${index}`}
+                className="sl-confetti-piece sl-confetti-rain"
+                style={
+                  {
+                    "--sl-confetti-left": `${(index * 17) % 100}%`,
+                    "--sl-confetti-delay": `${0.35 + (index % 12) * 0.07}s`,
+                    "--sl-confetti-duration": `${1.45 + (index % 7) * 0.14}s`,
+                    "--sl-confetti-rotate": `${(index * 47) % 360}deg`,
+                    "--sl-confetti-color": CONFETTI_COLORS[(index + 2) % CONFETTI_COLORS.length],
+                  } as CSSProperties
+                }
+              />
+            ))}
+          </div>
+        )}
+        {punchRunId > 0 && (
+          <div className="sl-punch-layer" aria-hidden="true" key={punchRunId}>
+            <div className="sl-punch-fist">{"\u{1F44A}"}</div>
+            <div className="sl-punch-impact">{"\u{1F4A5}"}</div>
+            {Array.from({ length: PUNCH_IMPACT_COUNT }).map((_, index) => (
+              <span
+                key={index}
+                className="sl-punch-spark"
+                style={
+                  {
+                    "--sl-punch-angle": `${(index * 360) / PUNCH_IMPACT_COUNT}deg`,
+                    "--sl-punch-distance": `${34 + (index % 5) * 8}px`,
+                    "--sl-punch-delay": `${(index % 4) * 0.025}s`,
+                  } as CSSProperties
+                }
+              />
+            ))}
+          </div>
+        )}
+        {loveRunId > 0 && (
+          <div className="sl-love-layer" aria-hidden="true" key={loveRunId}>
+            {Array.from({ length: LOVE_HEART_COUNT }).map((_, index) => (
+              <span
+                key={index}
+                className="sl-love-heart"
+                style={
+                  {
+                    "--sl-love-left": `${6 + (index * 19) % 88}%`,
+                    "--sl-love-start": `${18 + (index * 11) % 68}%`,
+                    "--sl-love-drift": `${index % 2 === 0 ? 1 : -1}`,
+                    "--sl-love-delay": `${(index % 14) * 0.08}s`,
+                    "--sl-love-duration": `${1.7 + (index % 7) * 0.13}s`,
+                    "--sl-love-size": `${18 + (index % 6) * 4}px`,
+                  } as CSSProperties
+                }
+              >
+                {index % 5 === 0 ? "\u2728" : index % 3 === 0 ? "\u{1F496}" : "\u2764\uFE0F"}
+              </span>
+            ))}
+          </div>
+        )}
         
         {/* Header */}
         <div className="p-3 border-bottom bg-body d-flex align-items-center justify-content-between">
@@ -2911,6 +3300,45 @@ const Chat = () => {
           <div style={{ display: "flex", gap: 8, alignItems: "center", position: "relative" }}>
             <button
               type="button"
+              className="btn btn-sm btn-outline-success"
+              onClick={triggerConfetti}
+              title="Confetti"
+              aria-label="Confetti"
+              disabled={!selectedUser}
+            >
+              {"\u{1F389}"}
+            </button>
+            <button
+              type="button"
+              className="btn btn-sm btn-outline-danger"
+              onClick={triggerPunch}
+              title="Punch"
+              aria-label="Punch"
+              disabled={!selectedUser}
+            >
+              {"\u{1F44A}"}
+            </button>
+            <button
+              type="button"
+              className="btn btn-sm btn-outline-danger"
+              onClick={triggerLove}
+              title="Love"
+              aria-label="Love"
+              disabled={!selectedUser}
+            >
+              {"\u2764\uFE0F"}
+            </button>
+            <span
+              aria-hidden="true"
+              style={{
+                width: 1,
+                height: 28,
+                background: "var(--bs-border-color)",
+                margin: "0 4px",
+              }}
+            />
+            <button
+              type="button"
               className={`btn btn-sm ${
                 privacyMode ? "btn-warning" : "btn-outline-warning"
               }`}
@@ -2919,16 +3347,6 @@ const Chat = () => {
               aria-label={privacyMode ? "Privacy mode on" : "Privacy mode off"}
             >
               {"\u{1F512}"}
-            </button>
-            <button
-              type="button"
-              className="btn btn-sm btn-outline-info"
-              onClick={openNotesForSelectedUser}
-              title="Private notes"
-              aria-label="Private notes"
-              disabled={!selectedUser}
-            >
-              {"\u{1F4DD}"}
             </button>
             <button
               type="button"
@@ -2967,6 +3385,16 @@ const Chat = () => {
                   }}
                 >
                   <div className="d-grid gap-2">
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-outline-info"
+                      onClick={() => {
+                        setIsHeaderMenuOpen(false)
+                        openNotesForSelectedUser()
+                      }}
+                    >
+                      {"\u{1F4DD}"} Notes
+                    </button>
                     <button
                       type="button"
                       className={`btn btn-sm ${
@@ -3444,6 +3872,57 @@ const Chat = () => {
           </>
         )}
 
+        {selectedUser && (visiblePinnedMessages.length > 0 || pinnedMessagesNotice) && (
+          <div className="border-bottom bg-body px-3 py-2">
+            <div className="d-flex align-items-center justify-content-between gap-2 mb-2">
+              <div className="small fw-semibold">
+                {"\u{1F4CC}"} Pinned ({visiblePinnedMessages.length}/{MAX_PINNED_MESSAGES})
+              </div>
+              {pinnedMessagesNotice && (
+                <div className="small text-warning text-end">{pinnedMessagesNotice}</div>
+              )}
+            </div>
+            {visiblePinnedMessages.length > 0 && (
+              <div className="d-flex gap-2 overflow-auto pb-1">
+                {visiblePinnedMessages.map((message) => {
+                  const preview = getCopyTextForMessage(message.message).trim() || "Message"
+                  return (
+                    <div
+                      key={message._id}
+                      className="border rounded bg-body-tertiary d-flex align-items-center gap-2 px-2 py-1"
+                      style={{ minWidth: 180, maxWidth: 280 }}
+                    >
+                      <button
+                        type="button"
+                        className="btn btn-link btn-sm text-start p-0 flex-grow-1 text-decoration-none"
+                        onClick={() => void openPinnedMessage(message)}
+                        title={preview}
+                        style={{ minWidth: 0 }}
+                      >
+                        <div className="small text-body-emphasis text-truncate">
+                          {preview}
+                        </div>
+                        <div className="small text-body-secondary text-truncate">
+                          {formatDateLabel(message.createdAt)} · {formatTimeLabel(message.createdAt)}
+                        </div>
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-sm btn-outline-secondary py-0 px-1"
+                        onClick={() => togglePinMessage(message)}
+                        title="Unpin message"
+                        aria-label="Unpin message"
+                      >
+                        {"\u2715"}
+                      </button>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Messages */}
         <div
           className="flex-grow-1 p-3 bg-body-tertiary"
@@ -3508,6 +3987,12 @@ const Chat = () => {
                                 socketService.deleteMessage(m._id)
                                 setMessages((prev) =>
                                   prev.filter((x) => x._id !== m._id && x._id !== g.gameId),
+                                )
+                                setPinnedMessageIds((prev) =>
+                                  prev.filter((id) => id !== m._id && id !== g.gameId),
+                                )
+                                setPinnedMessages((prev) =>
+                                  prev.filter((message) => message._id !== m._id && message._id !== g.gameId),
                                 )
                               } catch (e) {
                                 console.error("Failed to delete game", e)
@@ -3579,6 +4064,7 @@ const Chat = () => {
             const timeLabel = formatTimeLabel(m.createdAt)
             const decoded = decodeRichMessage(m.message)
             const isHighlighted = highlightedMessageId === m._id
+            const isPinned = isMessagePinned(m)
                 const bubble = (() => {
                   if (decoded.kind === "plain") {
                     const plain = decoded.value.trim()
@@ -3828,6 +4314,7 @@ const Chat = () => {
                     }`}
                   >
                     {timeLabel}
+                    {isPinned && <span className="ms-1">· {"\u{1F4CC}"}</span>}
                     {m.editedAt && <span className="ms-1">· edited</span>}
                     {isLastOutgoing && (
                       <>
@@ -4033,6 +4520,18 @@ const Chat = () => {
                       >
                         {isMessageStarred(m) ? "\u2605" : "\u2606"}
                       </button>
+                      <button
+                        type="button"
+                        className="btn btn-sm sl-menu-icon-btn"
+                        title={isMessagePinned(m) ? "Unpin message" : "Pin message"}
+                        aria-label={isMessagePinned(m) ? "Unpin message" : "Pin message"}
+                        onClick={() => {
+                          togglePinMessage(m)
+                          setMessageMenu(null)
+                        }}
+                      >
+                        {isMessagePinned(m) ? "\u{1F4CC}" : "\u{1F4CD}"}
+                      </button>
 
                       {canManage && canEdit && (
                         <button
@@ -4095,6 +4594,12 @@ const Chat = () => {
                             socketService.deleteMessage(messageMenu.messageId)
                             setMessages((prev) =>
                               prev.filter((x) => x._id !== messageMenu.messageId),
+                            )
+                            setPinnedMessageIds((prev) =>
+                              prev.filter((id) => id !== messageMenu.messageId),
+                            )
+                            setPinnedMessages((prev) =>
+                              prev.filter((message) => message._id !== messageMenu.messageId),
                             )
                             setMessageMenu(null)
                           } catch (e) {

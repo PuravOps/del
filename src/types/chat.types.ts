@@ -55,6 +55,9 @@ export interface MessageResponse {
   receiver: string
   message: string
   starred?: boolean
+  pinned?: boolean
+  pinnedAt?: string | null
+  pinnedBy?: string | null
   seen?: boolean
   seenAt?: string | null
   createdAt: string

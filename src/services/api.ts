@@ -88,6 +88,14 @@ export const getChatStarredMessages = (
   params?: { user1?: string; user2?: string },
 ) => api.get(`/chat/${chatId}/starred`, { params });
 
+export const setMessagePinned = (messageId: string, pinned: boolean, userPhone: string) =>
+  api.post(`/chat/${messageId}/pin`, { pinned, userPhone });
+
+export const getChatPinnedMessages = (
+  chatId: string,
+  params?: { user1?: string; user2?: string },
+) => api.get(`/chat/${chatId}/pinned`, { params });
+
 export const ping = () => api.get("/ping");
 
 export const registerUser = (data: any) => api.post("/users/register", data);

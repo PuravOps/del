@@ -23,6 +23,20 @@ export interface MessageUpdatedPayload {
   message: MessageResponse
 }
 
+export interface MessagePinnedPayload {
+  message: MessageResponse
+}
+
+export type ChatEffectKind = "confetti" | "punch" | "love"
+
+export interface ChatEffectPayload {
+  sender: string
+  receiver: string
+  effect: ChatEffectKind
+  eventId?: string
+  createdAt?: string
+}
+
 export interface PresenceUpdatePayload {
   userPhone: string
   status: PresenceStatus
@@ -68,6 +82,10 @@ class SocketService {
       // eslint-disable-next-line no-console
       console.info("socket received game.updated", (msg as any)?._id, (msg as any)?.gameId)
     })
+    this.socket.on("chatEffect", (payload) => {
+      // eslint-disable-next-line no-console
+      console.info("socket received chatEffect", payload)
+    })
   }
 
   connect(userId: string) {
@@ -101,6 +119,20 @@ class SocketService {
 
   updateMessage(messageId: string) {
     this.socket.emit("updateMessage", { messageId })
+  }
+
+  pinMessage(messageId: string) {
+    this.socket.emit("pinMessage", { messageId })
+  }
+
+  sendChatEffect(payload: ChatEffectPayload) {
+    if (!this.socket.connected) {
+      // eslint-disable-next-line no-console
+      console.warn("sendChatEffect called but socket not connected", payload)
+    }
+    // eslint-disable-next-line no-console
+    console.info("socket sending chatEffect", payload)
+    this.socket.emit("chatEffect", payload)
   }
 
   addReaction(messageId: string, emoji: string, userPhone: string) {
@@ -174,6 +206,22 @@ class SocketService {
 
   offMessageUpdated(callback?: (payload: MessageUpdatedPayload) => void) {
     this.socket.off("messageUpdated", callback as any)
+  }
+
+  onMessagePinned(callback: (payload: MessagePinnedPayload) => void) {
+    this.socket.on("messagePinned", callback)
+  }
+
+  offMessagePinned(callback?: (payload: MessagePinnedPayload) => void) {
+    this.socket.off("messagePinned", callback as any)
+  }
+
+  onChatEffect(callback: (payload: ChatEffectPayload) => void) {
+    this.socket.on("chatEffect", callback)
+  }
+
+  offChatEffect(callback?: (payload: ChatEffectPayload) => void) {
+    this.socket.off("chatEffect", callback as any)
   }
 
   onReactionAdded(callback: (payload: ReactionPayload) => void) {
