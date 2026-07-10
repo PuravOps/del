@@ -63,7 +63,7 @@ const Layout = ({ children }: Props) => {
   });
   const [isMobileLayout, setIsMobileLayout] = useState(false);
   const [isNavOpen, setIsNavOpen] = useState(false);
-  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [socketConnected, setSocketConnected] = useState(false);
   const [reminderSessions, setReminderSessions] = useState<Record<string, ReminderSession>>({});
   const [activeReminderPopups, setActiveReminderPopups] = useState<ReminderPopup[]>([]);

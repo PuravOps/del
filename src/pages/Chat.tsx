@@ -236,9 +236,9 @@ const Chat = () => {
       } & ReturnType<typeof makeReplyPreview>)
     | null
   >(null)
-  const [privacyMode, setPrivacyMode] = useState(false)
+  const [privacyMode, setPrivacyMode] = useState(true)
   const [isDrawerOpen, setIsDrawerOpen] = useState(false)
-  const [isSidebarOpen, setIsSidebarOpen] = useState(true)
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false)
   const [isMobileLayout, setIsMobileLayout] = useState(false)
   const [reactionPickerMessageId, setReactionPickerMessageId] = useState<string | null>(null)
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null)
@@ -306,6 +306,7 @@ const Chat = () => {
   const punchTimerRef = useRef<number | null>(null)
   const loveTimerRef = useRef<number | null>(null)
   const localChatEffectEventIdsRef = useRef<Set<string>>(new Set())
+  const didAutoSelectInitialUserRef = useRef(false)
 
   const sender = localStorage.getItem("userPhone") || ""
   const isPageActive = usePageActivity()
@@ -1179,6 +1180,15 @@ const Chat = () => {
     if (!sender) return users
     return users.filter((u) => u.phone !== sender)
   }, [users, sender])
+
+  useEffect(() => {
+    if (didAutoSelectInitialUserRef.current || selectedUser || chatUsers.length === 0) return
+
+    didAutoSelectInitialUserRef.current = true
+    setSelectedUser(chatUsers[0])
+    setIsDrawerOpen(false)
+    setIsSidebarOpen(false)
+  }, [chatUsers, selectedUser])
 
   const filteredMessages = useMemo(() => {
     if (!selectedUser) return []
@@ -2676,7 +2686,7 @@ const Chat = () => {
   }, [editingNoteId, persistPrivateNotes, privateNotes, resetNotesEditor])
 
   const selectChatUser = useCallback(
-    (user: User, { closeDrawer }: { closeDrawer?: boolean } = {}) => {
+    (user: User, _options: { closeDrawer?: boolean } = {}) => {
       stopTypingIndicator()
       setIsHeaderMenuOpen(false)
       setSelectedUser(user)
@@ -2684,7 +2694,8 @@ const Chat = () => {
       setSelectedGifUrl(null)
       setShowEmojiPicker(false)
       setShowGifPicker(false)
-      if (closeDrawer) setIsDrawerOpen(false)
+      setIsDrawerOpen(false)
+      setIsSidebarOpen(false)
       if (sender) {
         setUnreadCounts((prev) => ({ ...prev, [user.phone]: 0 }))
         socketService.markSeen({ sender: user.phone, receiver: sender })
