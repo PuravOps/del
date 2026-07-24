@@ -7,6 +7,7 @@ import type {
 } from "../types/chat.types";
 import type { PrivateNotesResponse } from "../types/privateNotes.types";
 import type { UserPresenceResponse } from "../types/user.types";
+import type { DailyQuoteApiResponse } from "../utils/quoteMessage";
 
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_URI,
@@ -97,6 +98,12 @@ export const getChatPinnedMessages = (
 ) => api.get(`/chat/${chatId}/pinned`, { params });
 
 export const ping = () => api.get("/ping");
+
+export const getDailyQuote = (dateKey?: string, options?: RequestOptions) =>
+  api.get<DailyQuoteApiResponse>("/daily-quote", {
+    ...options,
+    params: dateKey ? { dateKey } : undefined,
+  });
 
 export const registerUser = (data: any) => api.post("/users/register", data);
 

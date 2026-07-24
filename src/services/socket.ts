@@ -27,7 +27,7 @@ export interface MessagePinnedPayload {
   message: MessageResponse
 }
 
-export type ChatEffectKind = "confetti" | "punch" | "love"
+export type ChatEffectKind = "confetti" | "punch" | "love" | "hug" | "miss-you" | "sad"
 
 export interface ChatEffectPayload {
   sender: string

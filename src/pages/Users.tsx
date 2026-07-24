@@ -8,6 +8,7 @@ const EMPTY_FORM: UserFormPayload = {
   name: "",
   phone: "",
   password: "",
+  themePreference: "current",
 }
 
 const Users = () => {
@@ -54,6 +55,7 @@ const Users = () => {
       name: user.name,
       phone: user.phone,
       password: "",
+      themePreference: user.themePreference ?? "current",
     })
     setSubmitError("")
     setIsPanelOpen(true)
@@ -66,7 +68,7 @@ const Users = () => {
     setSubmitError("")
   }
 
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
     const { name, value } = e.target
     setForm((prev) => ({
       ...prev,
@@ -108,6 +110,7 @@ const Users = () => {
           name: form.name.trim(),
           phone: form.phone.trim(),
           password: form.password.trim() || undefined,
+          themePreference: form.themePreference ?? "current",
         })
       }
 
@@ -268,6 +271,24 @@ const Users = () => {
                       }
                     />
                   </div>
+
+                  {panelMode === "edit" && (
+                    <div className="mb-3">
+                      <label className="form-label">Theme</label>
+                      <select
+                        name="themePreference"
+                        className="form-select"
+                        value={form.themePreference ?? "current"}
+                        onChange={handleChange}
+                      >
+                        <option value="current">Current theme</option>
+                        <option value="google-chat">Google Chat theme</option>
+                      </select>
+                      <div className="form-text">
+                        Current theme is selected by default. Google Chat theme applies to this user's chat.
+                      </div>
+                    </div>
+                  )}
 
                   <div className="d-flex gap-2">
                     <button

@@ -2,8 +2,11 @@ export interface User {
   _id: string
   name: string
   phone: string
+  themePreference?: UserThemePreference
   lastActiveAt?: string | null
 }
+
+export type UserThemePreference = "current" | "google-chat"
 
 export type PresenceStatus = "online" | "away" | "offline"
 
@@ -29,4 +32,5 @@ export interface UserFormPayload {
   name: string
   phone: string
   password: string
+  themePreference?: UserThemePreference
 }

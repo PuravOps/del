@@ -680,7 +680,7 @@ const Layout = ({ children }: Props) => {
           {sidebarNav}
         </div>
       ) : isSidebarOpen ? (
-        <div className="border-end p-3 bg-body-tertiary shadow-sm" style={{ width: "240px" }}>
+        <div className="border-end p-3 bg-body-tertiary shadow-sm sl-app-sidebar" style={{ width: "240px" }}>
           <div className="d-flex align-items-center justify-content-between mb-3">
             <h4 className="mb-0">Blurr</h4>
             <button
@@ -697,8 +697,8 @@ const Layout = ({ children }: Props) => {
         </div>
       ) : null}
 
-      <div className="flex-grow-1 d-flex flex-column" style={{ minWidth: 0 }}>
-        <div className="border-bottom bg-body p-2 d-flex align-items-center justify-content-between gap-2">
+      <div className="flex-grow-1 d-flex flex-column sl-app-main" style={{ minWidth: 0 }}>
+        <div className="border-bottom bg-body p-2 d-flex align-items-center justify-content-between gap-2 sl-app-topbar">
           <button
             type="button"
             className="btn btn-outline-secondary btn-sm"
@@ -716,7 +716,7 @@ const Layout = ({ children }: Props) => {
             </div>
           )}
         </div>
-        <div className="flex-grow-1 p-4 overflow-auto">{children}</div>
+        <div className="flex-grow-1 p-4 overflow-auto sl-app-content">{children}</div>
       </div>
 
       {activeReminderPopups.length > 0 && (

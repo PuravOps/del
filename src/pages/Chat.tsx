@@ -19,6 +19,7 @@ import {
   getPrivateNotesVault,
   createPrivateNotesVault,
   updatePrivateNotesVault,
+  getDailyQuote,
 } from "../services/api"
 import axios from "axios"
 import { socketService } from "./ChatService"
@@ -41,6 +42,13 @@ import {
   type RichReplyToV1,
 } from "../utils/richChatMessage"
 import { extractSharedContent, isGifUrl } from "../utils/chatSharedContent"
+import {
+  createDailyQuoteMessage,
+  createDailyQuoteMessageFromQuote,
+  decodeDailyQuoteMessage,
+  getIstDateParts,
+  isDailyQuoteSendWindowIst,
+} from "../utils/quoteMessage"
 import type { User, UserPresenceResponse } from "../types/user.types"
 import type { ChatEffectKind, ChatEffectPayload, PresenceUpdatePayload, TypingUpdatePayload } from "../services/socket"
 import type { PrivateNote } from "../types/privateNotes.types"
@@ -55,6 +63,18 @@ const CONFETTI_CANNON_COUNT = 36
 const CONFETTI_RAIN_COUNT = 30
 const PUNCH_IMPACT_COUNT = 16
 const LOVE_HEART_COUNT = 34
+const HUG_EMOJI_COUNT = 18
+const CHAT_EFFECT_DISPLAY_MODE_STORAGE_KEY = "sl-chat-effect-display-mode"
+const DAILY_QUOTE_SENT_STORAGE_PREFIX = "sl-daily-quote-sent:"
+type ChatEffectDisplayMode = "effect" | "snack"
+const CHAT_EFFECT_LABELS: Record<ChatEffectKind, string> = {
+  confetti: "Confetti",
+  punch: "Punch",
+  love: "Love",
+  hug: "Hug",
+  "miss-you": "Miss you",
+  sad: "Sad",
+}
 
 const createChatEffectEventId = () =>
   `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
@@ -285,6 +305,16 @@ const Chat = () => {
   const [confettiRunId, setConfettiRunId] = useState(0)
   const [punchRunId, setPunchRunId] = useState(0)
   const [loveRunId, setLoveRunId] = useState(0)
+  const [hugRunId, setHugRunId] = useState(0)
+  const [missYouRunId, setMissYouRunId] = useState(0)
+  const [sadRunId, setSadRunId] = useState(0)
+  const [chatEffectDisplayMode, setChatEffectDisplayMode] = useState<ChatEffectDisplayMode>(() =>
+    localStorage.getItem(CHAT_EFFECT_DISPLAY_MODE_STORAGE_KEY) === "snack" ? "snack" : "effect",
+  )
+  const [chatEffectSnack, setChatEffectSnack] = useState<{
+    id: number
+    effect: ChatEffectKind
+  } | null>(null)
   const emojiContainerRef = useRef<HTMLDivElement | null>(null)
   const [pickerTheme, setPickerTheme] = useState<Theme>(() =>
     document.documentElement.getAttribute("data-bs-theme") === "dark" ? Theme.DARK : Theme.LIGHT,
@@ -305,6 +335,10 @@ const Chat = () => {
   const confettiTimerRef = useRef<number | null>(null)
   const punchTimerRef = useRef<number | null>(null)
   const loveTimerRef = useRef<number | null>(null)
+  const hugTimerRef = useRef<number | null>(null)
+  const missYouTimerRef = useRef<number | null>(null)
+  const sadTimerRef = useRef<number | null>(null)
+  const chatEffectSnackTimerRef = useRef<number | null>(null)
   const localChatEffectEventIdsRef = useRef<Set<string>>(new Set())
   const didAutoSelectInitialUserRef = useRef(false)
 
@@ -688,7 +722,21 @@ const Chat = () => {
     }, durationMs)
   }, [])
 
+  const showChatEffectSnack = useCallback((effect: ChatEffectKind) => {
+    setChatEffectSnack({ id: Date.now(), effect })
+    if (chatEffectSnackTimerRef.current) window.clearTimeout(chatEffectSnackTimerRef.current)
+    chatEffectSnackTimerRef.current = window.setTimeout(() => {
+      setChatEffectSnack(null)
+      chatEffectSnackTimerRef.current = null
+    }, 2200)
+  }, [])
+
   const playChatEffect = useCallback((effect: ChatEffectKind) => {
+    if (chatEffectDisplayMode === "snack") {
+      showChatEffectSnack(effect)
+      return
+    }
+
     if (effect === "confetti") {
       triggerChatEffect(setConfettiRunId, confettiTimerRef, 2600)
       return
@@ -697,8 +745,28 @@ const Chat = () => {
       triggerChatEffect(setPunchRunId, punchTimerRef, 1200)
       return
     }
+    if (effect === "hug") {
+      triggerChatEffect(setHugRunId, hugTimerRef, 2200)
+      return
+    }
+    if (effect === "miss-you") {
+      triggerChatEffect(setMissYouRunId, missYouTimerRef, 2600)
+      return
+    }
+    if (effect === "sad") {
+      triggerChatEffect(setSadRunId, sadTimerRef, 2400)
+      return
+    }
     triggerChatEffect(setLoveRunId, loveTimerRef, 2600)
-  }, [triggerChatEffect])
+  }, [chatEffectDisplayMode, showChatEffectSnack, triggerChatEffect])
+
+  const toggleChatEffectDisplayMode = useCallback(() => {
+    setChatEffectDisplayMode((prev) => {
+      const next: ChatEffectDisplayMode = prev === "effect" ? "snack" : "effect"
+      localStorage.setItem(CHAT_EFFECT_DISPLAY_MODE_STORAGE_KEY, next)
+      return next
+    })
+  }, [])
 
   const sendChatEffect = useCallback(
     (effect: ChatEffectKind) => {
@@ -733,6 +801,18 @@ const Chat = () => {
     sendChatEffect("love")
   }, [sendChatEffect])
 
+  const triggerHug = useCallback(() => {
+    sendChatEffect("hug")
+  }, [sendChatEffect])
+
+  const triggerMissYou = useCallback(() => {
+    sendChatEffect("miss-you")
+  }, [sendChatEffect])
+
+  const triggerSad = useCallback(() => {
+    sendChatEffect("sad")
+  }, [sendChatEffect])
+
   useEffect(() => {
     return () => {
       if (highlightTimerRef.current) window.clearTimeout(highlightTimerRef.current)
@@ -740,6 +820,10 @@ const Chat = () => {
       if (confettiTimerRef.current) window.clearTimeout(confettiTimerRef.current)
       if (punchTimerRef.current) window.clearTimeout(punchTimerRef.current)
       if (loveTimerRef.current) window.clearTimeout(loveTimerRef.current)
+      if (hugTimerRef.current) window.clearTimeout(hugTimerRef.current)
+      if (missYouTimerRef.current) window.clearTimeout(missYouTimerRef.current)
+      if (sadTimerRef.current) window.clearTimeout(sadTimerRef.current)
+      if (chatEffectSnackTimerRef.current) window.clearTimeout(chatEffectSnackTimerRef.current)
     }
   }, [])
 
@@ -1180,6 +1264,20 @@ const Chat = () => {
     if (!sender) return users
     return users.filter((u) => u.phone !== sender)
   }, [users, sender])
+
+  const currentUser = useMemo(
+    () => users.find((user) => user.phone === sender) ?? null,
+    [sender, users],
+  )
+  const selectedChatTheme = currentUser?.themePreference ?? "current"
+  const isGoogleChatTheme = selectedChatTheme === "google-chat"
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-sl-chat-theme", selectedChatTheme)
+    return () => {
+      document.documentElement.removeAttribute("data-sl-chat-theme")
+    }
+  }, [selectedChatTheme])
 
   useEffect(() => {
     if (didAutoSelectInitialUserRef.current || selectedUser || chatUsers.length === 0) return
@@ -2192,6 +2290,54 @@ const Chat = () => {
     [emitPresenceHeartbeat, scrollToBottom, selectedUser?.phone, sender, stopTypingIndicator],
   )
 
+  const sendDailyQuoteNow = useCallback(() => {
+    if (!sender || !selectedUser) return
+    void (async () => {
+      const { dateKey } = getIstDateParts()
+      let quoteMessage = createDailyQuoteMessage(dateKey)
+
+      try {
+        const response = await getDailyQuote(dateKey, { timeout: 10000 })
+        quoteMessage = createDailyQuoteMessageFromQuote(response.data)
+      } catch (error) {
+        console.error("Failed to load AI quote, using fallback.", error)
+      }
+
+      sendOutgoingTo(selectedUser.phone, quoteMessage)
+    })()
+    setIsHeaderMenuOpen(false)
+  }, [selectedUser, sendOutgoingTo, sender])
+
+  useEffect(() => {
+    if (!sender || !selectedUser) return
+
+    const sendDailyQuoteIfDue = async () => {
+      if (!isDailyQuoteSendWindowIst()) return
+
+      const { dateKey } = getIstDateParts()
+      const storageKey = `${DAILY_QUOTE_SENT_STORAGE_PREFIX}${sender}:${selectedUser.phone}`
+      if (localStorage.getItem(storageKey) === dateKey) return
+
+      localStorage.setItem(storageKey, dateKey)
+
+      let quoteMessage = createDailyQuoteMessage(dateKey)
+      try {
+        const response = await getDailyQuote(dateKey, { timeout: 10000 })
+        quoteMessage = createDailyQuoteMessageFromQuote(response.data)
+      } catch (error) {
+        console.error("Failed to load AI quote, using fallback.", error)
+      }
+
+      sendOutgoingTo(selectedUser.phone, quoteMessage)
+    }
+
+    void sendDailyQuoteIfDue()
+    const timer = window.setInterval(() => {
+      void sendDailyQuoteIfDue()
+    }, 60 * 1000)
+    return () => window.clearInterval(timer)
+  }, [selectedUser, sendOutgoingTo, sender])
+
   const isAllowedUploadFile = useCallback((file: File) => {
     const name = file.name.toLowerCase()
     const isPdf = file.type === "application/pdf" || name.endsWith(".pdf")
@@ -2706,7 +2852,42 @@ const Chat = () => {
   )
 
   return (
-    <div className="d-flex position-relative sl-chat">
+    <div
+      className={`d-flex position-relative sl-chat ${
+        isGoogleChatTheme ? "sl-chat-google" : ""
+      }`}
+    >
+      {isGoogleChatTheme && (
+        <>
+          <div className="sl-gchat-appbar" aria-hidden="true">
+            <div className="sl-gchat-appbar-left">
+              <span className="sl-gchat-menu">{"\u2630"}</span>
+              <span className="sl-gchat-logo">{"\u{1F7E2}"}</span>
+              <span className="sl-gchat-title">Chat</span>
+            </div>
+            <div className="sl-gchat-search">
+              <span>{"\u2315"}</span>
+              <span>Search chats</span>
+            </div>
+            <div className="sl-gchat-appbar-actions">
+              <span className="sl-gchat-status">{"\u25CF"}</span>
+              <span>{"?"}</span>
+              <span>{"\u2699"}</span>
+              <span>{"\u00BB"}</span>
+              <span>{"\u22EE"}</span>
+              <span className="sl-gchat-brand">triveni</span>
+            </div>
+          </div>
+          <div className="sl-gchat-right-rail" aria-hidden="true">
+            <span>{"\u{1F4C5}"}</span>
+            <span>{"\u{1F4A1}"}</span>
+            <span>{"\u2705"}</span>
+            <span>{"\u{1F464}"}</span>
+            <span className="sl-gchat-rail-line" />
+            <span>{"+"}</span>
+          </div>
+        </>
+      )}
       {imagePreview && (
         <>
           <div
@@ -3140,12 +3321,22 @@ const Chat = () => {
       {/* LEFT SIDE - USER LIST */}
       {!isMobileLayout && isSidebarOpen && (
       <div
+        className="sl-chat-sidebar"
         style={{
           width: "30%",
           borderRight: "1px solid #ddd",
           overflowY: "auto",
         }}
       >
+        {isGoogleChatTheme && (
+          <div className="sl-gchat-rail-icons" aria-label="Google Chat shortcuts">
+            <button type="button" className="sl-gchat-rail-new" title="New chat">
+              {"\u{1F5E8}"}
+            </button>
+            <span className="sl-gchat-rail-chevron">{"\u203A"}</span>
+            <span className="sl-gchat-rail-chevron">{"\u2304"}</span>
+          </div>
+        )}
         {chatUsers.map((user) => {
           const unread = unreadCounts[user.phone] ?? 0
           const isSelected = selectedUser?._id === user._id
@@ -3163,6 +3354,7 @@ const Chat = () => {
               }`}
               onClick={() => selectChatUser(user)}
               style={{ cursor: "pointer" }}
+              title={isGoogleChatTheme ? user.name : undefined}
             >
               <div className="d-flex align-items-center justify-content-between">
                 <strong className={hasUnseen ? "fw-semibold" : undefined}>
@@ -3174,11 +3366,26 @@ const Chat = () => {
             </div>
           )
         })}
+        {isGoogleChatTheme && (
+          <div className="sl-gchat-rail-icons sl-gchat-rail-lower" aria-label="Google Chat spaces">
+            <span className="sl-gchat-rail-chevron">{"\u2304"}</span>
+            <span className="sl-gchat-space-icon">D</span>
+            <span className="sl-gchat-space-icon">i</span>
+            <span className="sl-gchat-space-icon">B</span>
+            <span className="sl-gchat-space-icon">S</span>
+            <span className="sl-gchat-rail-chevron">{"\u2303"}</span>
+            <span className="sl-gchat-rail-chevron">{"\u2304"}</span>
+            <span className="sl-gchat-avatar-icon">{"\u{1F468}"}</span>
+            <span className="sl-gchat-avatar-icon">{"\u{1F469}"}</span>
+            <span className="sl-gchat-rail-chevron">{"\u2303"}</span>
+            <span className="sl-gchat-rail-chevron">{"\u2304"}</span>
+          </div>
+        )}
       </div>
       )}
 
       {/* RIGHT SIDE - CHAT AREA */}
-      <div className="flex-grow-1 d-flex flex-column position-relative">
+      <div className="flex-grow-1 d-flex flex-column position-relative sl-chat-main">
         {confettiRunId > 0 && (
           <div className="sl-confetti-layer" aria-hidden="true" key={confettiRunId}>
             {Array.from({ length: CONFETTI_CANNON_COUNT }).map((_, index) => {
@@ -3262,9 +3469,87 @@ const Chat = () => {
             ))}
           </div>
         )}
+        {hugRunId > 0 && (
+          <div className="sl-hug-layer" aria-hidden="true" key={hugRunId}>
+            <div className="sl-hug-core">{"\u{1F917}"}</div>
+            {Array.from({ length: HUG_EMOJI_COUNT }).map((_, index) => (
+              <span
+                key={index}
+                className="sl-hug-orbit"
+                style={
+                  {
+                    "--sl-hug-angle": `${(index * 360) / HUG_EMOJI_COUNT}deg`,
+                    "--sl-hug-distance": `${62 + (index % 5) * 12}px`,
+                    "--sl-hug-delay": `${(index % 6) * 0.045}s`,
+                    "--sl-hug-size": `${20 + (index % 4) * 4}px`,
+                  } as CSSProperties
+                }
+              >
+                {index % 4 === 0 ? "\u{1F49B}" : index % 3 === 0 ? "\u2728" : "\u{1F917}"}
+              </span>
+            ))}
+          </div>
+        )}
+        {missYouRunId > 0 && (
+          <div className="sl-miss-you-layer" aria-hidden="true" key={missYouRunId}>
+            <div className="sl-miss-you-vignette" />
+            <div className="sl-miss-you-moon">{"\u{1F319}"}</div>
+            <div className="sl-miss-you-card">
+              <div className="sl-miss-you-card-icon">{"\u{1F48C}"}</div>
+              <div>
+                <div className="sl-miss-you-text">Miss you</div>
+                <div className="sl-miss-you-subtext">wish you were here</div>
+              </div>
+            </div>
+            {Array.from({ length: 22 }).map((_, index) => (
+              <span
+                key={index}
+                className="sl-miss-you-note"
+                style={
+                  {
+                    "--sl-miss-left": `${6 + (index * 13) % 88}%`,
+                    "--sl-miss-start": `${18 + (index * 11) % 62}%`,
+                    "--sl-miss-delay": `${(index % 11) * 0.07}s`,
+                    "--sl-miss-drift": `${index % 2 === 0 ? 1 : -1}`,
+                    "--sl-miss-size": `${16 + (index % 5) * 4}px`,
+                  } as CSSProperties
+                }
+              >
+                {index % 5 === 0
+                  ? "\u{1F48C}"
+                  : index % 4 === 0
+                    ? "\u{1F49B}"
+                    : index % 3 === 0
+                      ? "\u{1F4AB}"
+                      : "\u2728"}
+              </span>
+            ))}
+          </div>
+        )}
+        {sadRunId > 0 && (
+          <div className="sl-sad-layer" aria-hidden="true" key={sadRunId}>
+            <div className="sl-sad-cloud">{"\u2601\uFE0F"}</div>
+            <div className="sl-sad-face">{"\u{1F622}"}</div>
+            {Array.from({ length: 18 }).map((_, index) => (
+              <span
+                key={index}
+                className="sl-sad-drop"
+                style={
+                  {
+                    "--sl-sad-left": `${8 + (index * 13) % 86}%`,
+                    "--sl-sad-delay": `${(index % 9) * 0.07}s`,
+                    "--sl-sad-duration": `${1.2 + (index % 5) * 0.12}s`,
+                  } as CSSProperties
+                }
+              >
+                {"\u{1F4A7}"}
+              </span>
+            ))}
+          </div>
+        )}
         
         {/* Header */}
-        <div className="p-3 border-bottom bg-body d-flex align-items-center justify-content-between">
+        <div className="p-3 border-bottom bg-body d-flex align-items-center justify-content-between sl-chat-header">
           <div className="d-flex align-items-center gap-2">
             <button
               type="button"
@@ -3282,7 +3567,9 @@ const Chat = () => {
               {"\u2630"}
             </button>
             {selectedUser ? (
-              <div>
+              <div className="d-flex align-items-center gap-2">
+                {isGoogleChatTheme && <span className="sl-gchat-chat-avatar">{"\u{1F309}"}</span>}
+                <div>
                 <strong
                   id="view-user-name"
                   style={{
@@ -3303,72 +3590,131 @@ const Chat = () => {
                 >
                   {presenceLabel || "Offline"}
                 </div>
+                </div>
               </div>
             ) : (
               "Select a user"
             )}
           </div>
-          <div style={{ display: "flex", gap: 8, alignItems: "center", position: "relative" }}>
-            <button
-              type="button"
-              className="btn btn-sm btn-outline-success"
-              onClick={triggerConfetti}
-              title="Confetti"
-              aria-label="Confetti"
-              disabled={!selectedUser}
-            >
-              {"\u{1F389}"}
-            </button>
-            <button
-              type="button"
-              className="btn btn-sm btn-outline-danger"
-              onClick={triggerPunch}
-              title="Punch"
-              aria-label="Punch"
-              disabled={!selectedUser}
-            >
-              {"\u{1F44A}"}
-            </button>
-            <button
-              type="button"
-              className="btn btn-sm btn-outline-danger"
-              onClick={triggerLove}
-              title="Love"
-              aria-label="Love"
-              disabled={!selectedUser}
-            >
-              {"\u2764\uFE0F"}
-            </button>
-            <span
-              aria-hidden="true"
-              style={{
-                width: 1,
-                height: 28,
-                background: "var(--bs-border-color)",
-                margin: "0 4px",
-              }}
-            />
-            <button
-              type="button"
-              className={`btn btn-sm ${
-                privacyMode ? "btn-warning" : "btn-outline-warning"
-              }`}
-              onClick={() => setPrivacyMode(!privacyMode)}
-              title={privacyMode ? "Privacy mode on" : "Privacy mode off"}
-              aria-label={privacyMode ? "Privacy mode on" : "Privacy mode off"}
-            >
-              {"\u{1F512}"}
-            </button>
-            <button
-              type="button"
-              className="btn btn-sm btn-outline-primary"
-              onClick={() => void refreshChatState()}
-              title="Refresh chats and notifications"
-              aria-label="Refresh chats and notifications"
-              disabled={isRefreshingChat}
-            >
-              {isRefreshingChat ? "..." : "\u21BB"}
-            </button>
+          <div className="sl-chat-header-actions" style={{ display: "flex", gap: 8, alignItems: "center", position: "relative" }}>
+            {!isGoogleChatTheme && (
+              <>
+                <div className="sl-chat-effect-grid">
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-outline-success"
+                    onClick={triggerConfetti}
+                    title="Confetti"
+                    aria-label="Confetti"
+                    disabled={!selectedUser}
+                  >
+                    {"\u{1F389}"}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-outline-danger"
+                    onClick={triggerPunch}
+                    title="Punch"
+                    aria-label="Punch"
+                    disabled={!selectedUser}
+                  >
+                    {"\u{1F44A}"}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-outline-danger"
+                    onClick={triggerLove}
+                    title="Love"
+                    aria-label="Love"
+                    disabled={!selectedUser}
+                  >
+                    {"\u2764\uFE0F"}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-outline-info"
+                    onClick={triggerHug}
+                    title="Hug"
+                    aria-label="Hug"
+                    disabled={!selectedUser}
+                  >
+                    {"\u{1F917}"}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-outline-info"
+                    onClick={triggerMissYou}
+                    title="Miss you"
+                    aria-label="Miss you"
+                    disabled={!selectedUser}
+                  >
+                    {"\u{1F48C}"}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-outline-secondary"
+                    onClick={triggerSad}
+                    title="Sad"
+                    aria-label="Sad"
+                    disabled={!selectedUser}
+                  >
+                    {"\u{1F622}"}
+                  </button>
+                </div>
+                <span
+                  aria-hidden="true"
+                  style={{
+                    width: 1,
+                    height: 28,
+                    background: "var(--bs-border-color)",
+                    margin: "0 4px",
+                  }}
+                />
+                <button
+                  type="button"
+                  className={`btn btn-sm ${
+                    privacyMode ? "btn-warning" : "btn-outline-warning"
+                  }`}
+                  onClick={() => setPrivacyMode(!privacyMode)}
+                  title={privacyMode ? "Privacy mode on" : "Privacy mode off"}
+                  aria-label={privacyMode ? "Privacy mode on" : "Privacy mode off"}
+                >
+                  {"\u{1F512}"}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-sm btn-outline-primary"
+                  onClick={() => void refreshChatState()}
+                  title="Refresh chats and notifications"
+                  aria-label="Refresh chats and notifications"
+                  disabled={isRefreshingChat}
+                >
+                  {isRefreshingChat ? "..." : "\u21BB"}
+                </button>
+              </>
+            )}
+            {isGoogleChatTheme && (
+              <>
+                <button
+                  type="button"
+                  className="btn btn-sm btn-outline-secondary"
+                  title="Start meeting"
+                  aria-label="Start meeting"
+                  disabled={!selectedUser}
+                >
+                  {"\u{1F4F9}"}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-sm btn-outline-secondary"
+                  title="Files"
+                  aria-label="Files"
+                  disabled={!selectedUser}
+                >
+                  {"\u{1F4C1}"}
+                </button>
+              </>
+            )}
             <button
               type="button"
               className="btn btn-sm btn-outline-secondary"
@@ -3396,6 +3742,107 @@ const Chat = () => {
                   }}
                 >
                   <div className="d-grid gap-2">
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-outline-secondary"
+                      onClick={toggleChatEffectDisplayMode}
+                    >
+                      {chatEffectDisplayMode === "effect" ? "Show as snack" : "Show as effect"}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-outline-info"
+                      onClick={sendDailyQuoteNow}
+                    >
+                      {"\u2728"} Send quote now
+                    </button>
+                    {isGoogleChatTheme && (
+                      <>
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-outline-success"
+                          onClick={() => {
+                            setIsHeaderMenuOpen(false)
+                            triggerConfetti()
+                          }}
+                        >
+                          {"\u{1F389}"} Confetti
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-outline-danger"
+                          onClick={() => {
+                            setIsHeaderMenuOpen(false)
+                            triggerPunch()
+                          }}
+                        >
+                          {"\u{1F44A}"} Punch
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-outline-danger"
+                          onClick={() => {
+                            setIsHeaderMenuOpen(false)
+                            triggerLove()
+                          }}
+                        >
+                          {"\u2764\uFE0F"} Love
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-outline-info"
+                          onClick={() => {
+                            setIsHeaderMenuOpen(false)
+                            triggerHug()
+                          }}
+                        >
+                          {"\u{1F917}"} Hug
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-outline-info"
+                          onClick={() => {
+                            setIsHeaderMenuOpen(false)
+                            triggerMissYou()
+                          }}
+                        >
+                          {"\u{1F48C}"} Miss you
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-outline-secondary"
+                          onClick={() => {
+                            setIsHeaderMenuOpen(false)
+                            triggerSad()
+                          }}
+                        >
+                          {"\u{1F622}"} Sad
+                        </button>
+                        <button
+                          type="button"
+                          className={`btn btn-sm ${
+                            privacyMode ? "btn-warning" : "btn-outline-warning"
+                          }`}
+                          onClick={() => {
+                            setIsHeaderMenuOpen(false)
+                            setPrivacyMode(!privacyMode)
+                          }}
+                        >
+                          {"\u{1F512}"} Privacy
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-outline-primary"
+                          onClick={() => {
+                            setIsHeaderMenuOpen(false)
+                            void refreshChatState()
+                          }}
+                          disabled={isRefreshingChat}
+                        >
+                          {isRefreshingChat ? "Refreshing..." : "\u21BB Refresh"}
+                        </button>
+                      </>
+                    )}
                     <button
                       type="button"
                       className="btn btn-sm btn-outline-info"
@@ -3884,7 +4331,7 @@ const Chat = () => {
         )}
 
         {selectedUser && (visiblePinnedMessages.length > 0 || pinnedMessagesNotice) && (
-          <div className="border-bottom bg-body px-3 py-2">
+          <div className="border-bottom bg-body px-3 py-2 sl-pinned-strip">
             <div className="d-flex align-items-center justify-content-between gap-2 mb-2">
               <div className="small fw-semibold">
                 {"\u{1F4CC}"} Pinned ({visiblePinnedMessages.length}/{MAX_PINNED_MESSAGES})
@@ -3936,7 +4383,7 @@ const Chat = () => {
 
         {/* Messages */}
         <div
-          className="flex-grow-1 p-3 bg-body-tertiary"
+          className="flex-grow-1 p-3 bg-body-tertiary sl-chat-messages"
           style={{ overflowY: "auto" }}
           ref={messagesContainerRef}
           onScroll={() => {
@@ -3967,6 +4414,35 @@ const Chat = () => {
             }
 
             const m = item.msg
+            const quoteDecoded = decodeDailyQuoteMessage(m.message ?? "")
+            if (quoteDecoded.kind === "quote") {
+              const quote = quoteDecoded.value
+              return (
+                <div key={item.key} className="d-flex justify-content-center my-3">
+                  <div
+                    className={`sl-daily-quote-card sl-daily-quote-${quote.category}`}
+                    style={{
+                      filter: privacyMode ? "blur(10px)" : undefined,
+                      cursor: privacyMode ? "pointer" : undefined,
+                      transition: privacyMode ? "filter 0.2s ease" : undefined,
+                    }}
+                    onMouseEnter={(e) => {
+                      if (privacyMode) e.currentTarget.style.filter = "blur(0px)"
+                    }}
+                    onMouseLeave={(e) => {
+                      if (privacyMode) e.currentTarget.style.filter = "blur(10px)"
+                    }}
+                  >
+                    <div className="sl-daily-quote-eyebrow">Daily {quote.category} quote</div>
+                    <div className="sl-daily-quote-text">"{quote.quote}"</div>
+                    <div className="sl-daily-quote-meta">
+                      {quote.author?.trim() || "Mira Vale"} · {formatTimeLabel(m.createdAt)}
+                    </div>
+                  </div>
+                </div>
+              )
+            }
+
             // detect inline game message
             const gameDecoded = decodeGameMessage(m.message ?? "")
             if (gameDecoded.kind === "game") {
@@ -4282,7 +4758,7 @@ const Chat = () => {
             return (
               <div
                 key={item.key}
-                className={`mb-2 d-flex ${
+                className={`mb-2 d-flex sl-chat-message-row ${
                   isOutgoing ? "justify-content-end" : "justify-content-start"
                 }`}
                 style={{ position: "relative" }}
@@ -4631,7 +5107,25 @@ const Chat = () => {
 
         {/* Input */}
         {selectedUser && (
-          <div className="p-3 border-top" style={{ position: "relative" }}>
+          <div className="p-3 border-top sl-chat-composer-shell" style={{ position: "relative" }}>
+            {chatEffectSnack && (
+              <div className="sl-chat-effect-snack" role="status" aria-live="polite">
+                <span className="sl-chat-effect-snack-icon">
+                  {chatEffectSnack.effect === "confetti"
+                    ? "\u{1F389}"
+                    : chatEffectSnack.effect === "punch"
+                      ? "\u{1F44A}"
+                      : chatEffectSnack.effect === "hug"
+                        ? "\u{1F917}"
+                        : chatEffectSnack.effect === "miss-you"
+                          ? "\u{1F48C}"
+                          : chatEffectSnack.effect === "sad"
+                            ? "\u{1F622}"
+                            : "\u2764\uFE0F"}
+                </span>
+                <span>{CHAT_EFFECT_LABELS[chatEffectSnack.effect]}</span>
+              </div>
+            )}
             {sendError && (
               <div className="alert alert-warning py-2 mb-2">{sendError}</div>
             )}
@@ -4760,7 +5254,7 @@ const Chat = () => {
                 </button>
               </div>
             )}
-            <div className="d-flex align-items-center">
+            <div className="d-flex align-items-center sl-chat-composer">
               <input
                 ref={fileInputRef}
                 type="file"
@@ -4841,8 +5335,13 @@ const Chat = () => {
               >
                 {"\u{1F4CE}"}
               </button>
-              <button className="btn btn-success ms-2" onClick={sendMessage}>
-                {editingMessageId ? "Update" : "Send"}
+              <button
+                className="btn btn-success ms-2 sl-send-button"
+                onClick={sendMessage}
+                aria-label={editingMessageId ? "Update message" : "Send message"}
+                title={editingMessageId ? "Update" : "Send"}
+              >
+                {isGoogleChatTheme ? "\u27A4" : editingMessageId ? "Update" : "Send"}
               </button>
             </div>
 
