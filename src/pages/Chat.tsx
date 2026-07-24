@@ -339,6 +339,7 @@ const Chat = () => {
   const missYouTimerRef = useRef<number | null>(null)
   const sadTimerRef = useRef<number | null>(null)
   const chatEffectSnackTimerRef = useRef<number | null>(null)
+  const chatEffectDisplayModeRef = useRef<ChatEffectDisplayMode>(chatEffectDisplayMode)
   const localChatEffectEventIdsRef = useRef<Set<string>>(new Set())
   const didAutoSelectInitialUserRef = useRef(false)
 
@@ -731,8 +732,12 @@ const Chat = () => {
     }, 2200)
   }, [])
 
-  const playChatEffect = useCallback((effect: ChatEffectKind) => {
-    if (chatEffectDisplayMode === "snack") {
+  useEffect(() => {
+    chatEffectDisplayModeRef.current = chatEffectDisplayMode
+  }, [chatEffectDisplayMode])
+
+  const playChatEffectWithMode = useCallback((effect: ChatEffectKind, mode: ChatEffectDisplayMode) => {
+    if (mode === "snack") {
       showChatEffectSnack(effect)
       return
     }
@@ -758,7 +763,11 @@ const Chat = () => {
       return
     }
     triggerChatEffect(setLoveRunId, loveTimerRef, 2600)
-  }, [chatEffectDisplayMode, showChatEffectSnack, triggerChatEffect])
+  }, [showChatEffectSnack, triggerChatEffect])
+
+  const playChatEffect = useCallback((effect: ChatEffectKind) => {
+    playChatEffectWithMode(effect, chatEffectDisplayModeRef.current)
+  }, [playChatEffectWithMode])
 
   const toggleChatEffectDisplayMode = useCallback(() => {
     setChatEffectDisplayMode((prev) => {
