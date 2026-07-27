@@ -4779,6 +4779,9 @@ const Chat = () => {
                   }}
                   style={{
                     maxWidth: "60%",
+                    minWidth: 0,
+                    overflowWrap: "anywhere",
+                    wordBreak: "break-word",
                     position: "relative",
                     fontSize: "0.95rem",
                     paddingBottom: m.reactions && m.reactions.length > 0 ? 28 : undefined,

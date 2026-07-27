@@ -89,6 +89,10 @@ textarea {
   border: 1px solid var(--bs-border-color-translucent);
   background: var(--sl-panel);
   color: var(--bs-body-color);
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: normal;
 }
 
 .sl-bubble-out {
@@ -104,6 +108,8 @@ textarea {
 .sl-bubble-link-out,
 .sl-bubble-link-in {
   color: var(--bs-link-color);
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .sl-bubble-link-out:hover,
