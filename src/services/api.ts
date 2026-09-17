@@ -21,6 +21,8 @@ type RequestOptions = {
   timeout?: number;
 };
 
+type DailyQuoteLanguage = "gujarati" | "hindi" | "english";
+
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem("token");
   if (token) {
@@ -99,10 +101,17 @@ export const getChatPinnedMessages = (
 
 export const ping = () => api.get("/ping");
 
-export const getDailyQuote = (dateKey?: string, options?: RequestOptions) =>
+export const getDailyQuote = (
+  dateKey?: string,
+  options?: RequestOptions & { language?: DailyQuoteLanguage; category?: string },
+) =>
   api.get<DailyQuoteApiResponse>("/daily-quote", {
     ...options,
-    params: dateKey ? { dateKey } : undefined,
+    params: {
+      ...(dateKey ? { dateKey } : {}),
+      ...(options?.language ? { language: options.language } : {}),
+      ...(options?.category ? { category: options.category } : {}),
+    },
   });
 
 export const registerUser = (data: any) => api.post("/users/register", data);

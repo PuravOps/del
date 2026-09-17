@@ -1,5 +1,5 @@
 ﻿import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react"
-import type { ClipboardEvent, ChangeEvent, CSSProperties, Dispatch, MutableRefObject, SetStateAction } from "react"
+import type { ClipboardEvent, ChangeEvent, CSSProperties, Dispatch, MutableRefObject, ReactNode, SetStateAction } from "react"
 import {
   getMessages,
   getUnseenCounts,
@@ -24,6 +24,9 @@ import {
 import axios from "axios"
 import { socketService } from "./ChatService"
 import TicTacToeCard from "../components/TicTacToeCard"
+import AsteroidDodge from "../components/AsteroidDodge"
+import MemoryMatch from "../components/MemoryMatch"
+import Sudoku from "../components/Sudoku"
 import { encodeGameMessage, decodeGameMessage, type TicTacToePayloadV1 } from "../utils/gameMessage"
 import type {
   MessageResponse,
@@ -74,6 +77,12 @@ const CHAT_EFFECT_LABELS: Record<ChatEffectKind, string> = {
   hug: "Hug",
   "miss-you": "Miss you",
   sad: "Sad",
+}
+const DAILY_QUOTE_LANGUAGES = ["gujarati", "hindi", "english"] as const
+
+const getDailyQuoteLanguageForDate = (dateKey: string) => {
+  const seed = [...dateKey].reduce((sum, char) => sum + char.charCodeAt(0), 0)
+  return DAILY_QUOTE_LANGUAGES[seed % DAILY_QUOTE_LANGUAGES.length]
 }
 
 const createChatEffectEventId = () =>
@@ -214,7 +223,153 @@ const mergeSharedCollections = (
   }
 }
 
-const extractUrlsFromText = (value: string) => value.match(/https?:\/\/[^\s<>"'`]+/gi) ?? []
+const URL_REGEX = /https?:\/\/[^\s<>"'`]+/gi
+const cleanUrl = (url: string) => url.replace(/[),.!?;:]+$/g, "")
+const extractUrlsFromText = (value: string) => (value.match(URL_REGEX) ?? []).map(cleanUrl).filter(Boolean)
+
+const getUrlHostname = (url: string) => {
+  try {
+    return new URL(url).hostname.replace(/^www\./i, "")
+  } catch {
+    return url.replace(/^https?:\/\//i, "").split("/")[0] ?? url
+  }
+}
+
+const isMapUrl = (url: string) => {
+  try {
+    const parsed = new URL(url)
+    const host = parsed.hostname.toLowerCase()
+    const path = parsed.pathname.toLowerCase()
+    return (
+      host.includes("google.") && path.includes("/maps") ||
+      host === "maps.app.goo.gl" ||
+      host === "goo.gl" && path.startsWith("/maps") ||
+      host.includes("waze.com") ||
+      host.includes("openstreetmap.org")
+    )
+  } catch {
+    return false
+  }
+}
+
+const titleCaseFromSlug = (value: string) =>
+  decodeURIComponent(value)
+    .replace(/\+/g, " ")
+    .replace(/[-_]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+
+const getMapPreviewTitle = (url: string) => {
+  try {
+    const parsed = new URL(url)
+    const query =
+      parsed.searchParams.get("q") ??
+      parsed.searchParams.get("query") ??
+      parsed.searchParams.get("destination") ??
+      parsed.searchParams.get("ll")
+    if (query?.trim()) return titleCaseFromSlug(query)
+
+    const placeMatch = parsed.pathname.match(/\/place\/([^/]+)/i)
+    if (placeMatch?.[1]) return titleCaseFromSlug(placeMatch[1])
+
+    const coordinateMatch = parsed.href.match(/@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/)
+    if (coordinateMatch) return `${coordinateMatch[1]}, ${coordinateMatch[2]}`
+  } catch {
+    return ""
+  }
+
+  return ""
+}
+
+const getLinkPreviewInfo = (url: string) => {
+  const host = getUrlHostname(url)
+  const isMap = isMapUrl(url)
+  if (isMap) {
+    const title = getMapPreviewTitle(url)
+    return {
+      isMap,
+      host,
+      title: title || "Open location in Maps",
+      description: "Map location",
+    }
+  }
+
+  try {
+    const parsed = new URL(url)
+    const readablePath = titleCaseFromSlug(parsed.pathname.split("/").filter(Boolean).slice(-1)[0] ?? "")
+    return {
+      isMap,
+      host,
+      title: readablePath || host,
+      description: parsed.pathname === "/" ? "Shared link" : host,
+    }
+  } catch {
+    return {
+      isMap,
+      host,
+      title: host,
+      description: "Shared link",
+    }
+  }
+}
+
+const getSelectedTextWithin = (container: HTMLElement) => {
+  const selection = window.getSelection()
+  const text = selection?.toString().trim().replace(/\s+/g, " ") ?? ""
+  if (!text) return ""
+
+  const anchorNode = selection?.anchorNode
+  const focusNode = selection?.focusNode
+  if (!anchorNode || !focusNode) return ""
+  if (!container.contains(anchorNode) || !container.contains(focusNode)) return ""
+
+  return text.slice(0, 500)
+}
+
+const openExternalPage = (url: string) => {
+  const opened = window.open(url, "_blank", "noopener,noreferrer")
+  return Boolean(opened)
+}
+
+const LinkPreviewCard = ({
+  isOutgoingMessage,
+  onOpen,
+  url,
+}: {
+  isOutgoingMessage: boolean
+  onOpen: (url: string) => void
+  url: string
+}) => {
+  const preview = getLinkPreviewInfo(url)
+  return (
+    <a
+      href={url}
+      onClick={(e) => {
+        e.preventDefault()
+        onOpen(url)
+      }}
+      className={`sl-link-preview ${isOutgoingMessage ? "sl-link-preview-out" : "sl-link-preview-in"} ${
+        preview.isMap ? "sl-link-preview-map" : ""
+      }`}
+    >
+      <span className="sl-link-preview-art" aria-hidden="true">
+        {preview.isMap ? (
+          <>
+            <span className="sl-link-preview-map-grid" />
+            <span className="sl-link-preview-pin">{"\u{1F4CD}"}</span>
+          </>
+        ) : (
+          <span className="sl-link-preview-chain">{"\u{1F517}"}</span>
+        )}
+      </span>
+      <span className="sl-link-preview-body">
+        <span className="sl-link-preview-title">{preview.title}</span>
+        <span className="sl-link-preview-desc">{preview.description}</span>
+        <span className="sl-link-preview-host">{preview.host}</span>
+      </span>
+    </a>
+  )
+}
 
 const Chat = () => {
   const [users, setUsers] = useState<User[]>([])
@@ -242,6 +397,7 @@ const Chat = () => {
         messageId: string
         top: number
         left: number
+        selectedText?: string
       }
     | null
   >(null)
@@ -273,8 +429,14 @@ const Chat = () => {
   >([])
   const [uploadError, setUploadError] = useState<string | null>(null)
   const [imagePreview, setImagePreview] = useState<{ url: string; title?: string } | null>(null)
+  const [webPreview, setWebPreview] = useState<{ url: string; title: string; host: string } | null>(null)
+  const [webPreviewStatus, setWebPreviewStatus] = useState<"loading" | "loaded" | "failed">("loading")
+  const [webPreviewToast, setWebPreviewToast] = useState<{ id: number; message: string } | null>(null)
   const [imagePreviewZoom, setImagePreviewZoom] = useState(1)
   const [isHeaderMenuOpen, setIsHeaderMenuOpen] = useState(false)
+  const [isAsteroidDodgeOpen, setIsAsteroidDodgeOpen] = useState(false)
+  const [isMemoryMatchOpen, setIsMemoryMatchOpen] = useState(false)
+  const [isSudokuOpen, setIsSudokuOpen] = useState(false)
   const [isSharedPanelOpen, setIsSharedPanelOpen] = useState(false)
   const [sharedPanelTab, setSharedPanelTab] = useState<"media" | "files" | "links">("media")
   const [sharedContent, setSharedContent] = useState<SharedContentCollection>(EMPTY_SHARED_CONTENT)
@@ -341,6 +503,7 @@ const Chat = () => {
   const chatEffectSnackTimerRef = useRef<number | null>(null)
   const chatEffectDisplayModeRef = useRef<ChatEffectDisplayMode>(chatEffectDisplayMode)
   const localChatEffectEventIdsRef = useRef<Set<string>>(new Set())
+  const dailyQuoteInFlightRef = useRef<Set<string>>(new Set())
   const didAutoSelectInitialUserRef = useRef(false)
 
   const sender = localStorage.getItem("userPhone") || ""
@@ -847,6 +1010,30 @@ const Chat = () => {
   }, [imagePreview])
 
   useEffect(() => {
+    if (!webPreview) return
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setWebPreview(null)
+    }
+    window.addEventListener("keydown", onKeyDown)
+    return () => window.removeEventListener("keydown", onKeyDown)
+  }, [webPreview])
+
+  useEffect(() => {
+    if (!webPreview || webPreviewStatus !== "loading") return
+
+    // Some browsers do not fire iframe onError for X-Frame-Options/CSP blocks.
+    // Keep the modal open, but replace the frame with an explicit fallback action.
+    const timer = window.setTimeout(() => setWebPreviewStatus("failed"), 8000)
+    return () => window.clearTimeout(timer)
+  }, [webPreview, webPreviewStatus])
+
+  useEffect(() => {
+    if (!webPreviewToast) return
+    const timer = window.setTimeout(() => setWebPreviewToast(null), 3500)
+    return () => window.clearTimeout(timer)
+  }, [webPreviewToast])
+
+  useEffect(() => {
     if (!showEmojiPicker) return
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") setShowEmojiPicker(false)
@@ -904,6 +1091,96 @@ const Chat = () => {
     if (last < text.length) nodes.push(text.slice(last))
     return nodes
   }, [])
+
+  const openWebPreview = useCallback((url: string) => {
+    const preview = getLinkPreviewInfo(url)
+    setWebPreviewStatus("loading")
+    setWebPreview({ url, title: preview.title, host: preview.host })
+  }, [])
+
+  const openGoogleSearchPreview = useCallback((query: string) => {
+    const trimmed = query.trim()
+    if (!trimmed) return
+
+    const url = `https://www.google.com/search?igu=1&q=${encodeURIComponent(trimmed)}`
+    setWebPreviewStatus("loading")
+    setWebPreview({ url, title: `Search: ${trimmed}`, host: "google.com" })
+  }, [])
+
+  const renderTextWithLinks = useCallback(
+    (text: string, isOutgoingMessage: boolean) => {
+      if (!text) return null
+
+      const nodes: ReactNode[] = []
+      let lastIndex = 0
+      const matches = text.matchAll(URL_REGEX)
+
+      for (const match of matches) {
+        const rawUrl = match[0]
+        const start = match.index ?? 0
+        const cleanedUrl = cleanUrl(rawUrl)
+        const trailing = rawUrl.slice(cleanedUrl.length)
+
+        if (start > lastIndex) {
+          nodes.push(
+            <span key={`text-${lastIndex}-${start}`}>{renderEmojiText(text.slice(lastIndex, start))}</span>,
+          )
+        }
+
+        nodes.push(
+          <a
+            key={`url-${start}-${cleanedUrl}`}
+            href={cleanedUrl}
+            onClick={(e) => {
+              e.preventDefault()
+              openWebPreview(cleanedUrl)
+            }}
+            className={isOutgoingMessage ? "sl-bubble-link-out" : "sl-bubble-link-in"}
+          >
+            {cleanedUrl}
+          </a>,
+        )
+
+        if (trailing) {
+          nodes.push(<span key={`trail-${start}`}>{renderEmojiText(trailing)}</span>)
+        }
+        lastIndex = start + rawUrl.length
+      }
+
+      if (lastIndex < text.length) {
+        nodes.push(<span key={`text-${lastIndex}-end`}>{renderEmojiText(text.slice(lastIndex))}</span>)
+      }
+
+      return nodes.length ? nodes : renderEmojiText(text)
+    },
+    [openWebPreview, renderEmojiText],
+  )
+
+  const renderLinkPreview = useCallback((text: string, isOutgoingMessage: boolean) => {
+    const previewUrl = extractUrlsFromText(text).find((url) => !isGifUrl(url))
+    if (!previewUrl) return null
+
+    return (
+      <LinkPreviewCard
+        isOutgoingMessage={isOutgoingMessage}
+        onOpen={openWebPreview}
+        url={previewUrl}
+      />
+    )
+  }, [openWebPreview])
+
+  const renderMessageText = useCallback(
+    (text: string, isOutgoingMessage: boolean) => {
+      if (!text) return null
+      return (
+        <div className="sl-message-text-with-preview">
+          <div style={{ whiteSpace: "pre-wrap" }}>{renderTextWithLinks(text, isOutgoingMessage)}</div>
+          {renderLinkPreview(text, isOutgoingMessage)}
+        </div>
+      )
+    },
+    [renderLinkPreview, renderTextWithLinks],
+  )
 
   const insertIntoInputAtCursor = useCallback(
     (toInsert: string) => {
@@ -995,7 +1272,12 @@ const Chat = () => {
       let top = e.clientY
       top = Math.max(8, Math.min(top, window.innerHeight - MENU_H - 8))
 
-      setMessageMenu({ messageId: m._id, top, left })
+      setMessageMenu({
+        messageId: m._id,
+        top,
+        left,
+        selectedText: getSelectedTextWithin(e.currentTarget),
+      })
       setShowEmojiPicker(false)
       setShowGifPicker(false)
     },
@@ -1754,6 +2036,48 @@ const Chat = () => {
     if (ad.length >= 10 && bd.length >= 10 && ad.slice(-10) === bd.slice(-10)) return true
     return false
   }
+  const getDailyQuoteStorageKey = useCallback(
+    (userA: string, userB: string, dateKey: string) => {
+      const pair = [normalizeId(userA), normalizeId(userB)].sort()
+      return `${DAILY_QUOTE_SENT_STORAGE_PREFIX}${pair[0]}:${pair[1]}:${dateKey}`
+    },
+    [],
+  )
+  const isDailyQuoteForDate = useCallback((message: MessageResponse, dateKey: string) => {
+    const decoded = decodeDailyQuoteMessage(message.message ?? "")
+    return decoded.kind === "quote" && decoded.value.dateKey === dateKey
+  }, [])
+  const chatHasDailyQuoteForDate = useCallback(
+    (dateKey: string, list = messagesRef.current) => list.some((message) => isDailyQuoteForDate(message, dateKey)),
+    [isDailyQuoteForDate],
+  )
+  const serverHasDailyQuoteForDate = useCallback(
+    async (dateKey: string) => {
+      if (!sender || !selectedUser) return true
+      if (chatHasDailyQuoteForDate(dateKey)) return true
+
+      try {
+        let before: string | undefined
+        for (let page = 0; page < 10; page += 1) {
+          const response = await getMessages(sender, selectedUser.phone, { limit: 100, before })
+          const serverMessages = Array.isArray(response.data) ? (response.data as MessageResponse[]) : []
+          if (chatHasDailyQuoteForDate(dateKey, serverMessages)) return true
+          if (serverMessages.length < 100) return false
+
+          before = [...serverMessages].sort(
+            (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
+          )[0]?.createdAt
+          if (!before) return false
+        }
+
+        return false
+      } catch (error) {
+        console.error("Failed to verify existing daily quote; skipping auto quote to avoid duplicates.", error)
+        return true
+      }
+    },
+    [chatHasDailyQuoteForDate, selectedUser, sender],
+  )
 
   useEffect(() => {
     if (!selectedUser) return
@@ -2303,19 +2627,44 @@ const Chat = () => {
     if (!sender || !selectedUser) return
     void (async () => {
       const { dateKey } = getIstDateParts()
-      let quoteMessage = createDailyQuoteMessage(dateKey)
+      const storageKey = getDailyQuoteStorageKey(sender, selectedUser.phone, dateKey)
+      if (dailyQuoteInFlightRef.current.has(storageKey)) return
+      dailyQuoteInFlightRef.current.add(storageKey)
 
       try {
-        const response = await getDailyQuote(dateKey, { timeout: 10000 })
-        quoteMessage = createDailyQuoteMessageFromQuote(response.data)
-      } catch (error) {
-        console.error("Failed to load AI quote, using fallback.", error)
-      }
+        if (
+          (localStorage.getItem(storageKey) === dateKey && chatHasDailyQuoteForDate(dateKey)) ||
+          (await serverHasDailyQuoteForDate(dateKey))
+        ) {
+          localStorage.setItem(storageKey, dateKey)
+          return
+        }
 
-      sendOutgoingTo(selectedUser.phone, quoteMessage)
+        const language = getDailyQuoteLanguageForDate(dateKey)
+        let quoteMessage = createDailyQuoteMessage(dateKey)
+
+        try {
+          const response = await getDailyQuote(dateKey, { timeout: 10000, language })
+          quoteMessage = createDailyQuoteMessageFromQuote(response.data)
+        } catch (error) {
+          console.error("Failed to load AI quote, using fallback.", error)
+        }
+
+        sendOutgoingTo(selectedUser.phone, quoteMessage)
+        localStorage.setItem(storageKey, dateKey)
+      } finally {
+        dailyQuoteInFlightRef.current.delete(storageKey)
+      }
     })()
     setIsHeaderMenuOpen(false)
-  }, [selectedUser, sendOutgoingTo, sender])
+  }, [
+    chatHasDailyQuoteForDate,
+    getDailyQuoteStorageKey,
+    selectedUser,
+    sendOutgoingTo,
+    sender,
+    serverHasDailyQuoteForDate,
+  ])
 
   useEffect(() => {
     if (!sender || !selectedUser) return
@@ -2324,20 +2673,34 @@ const Chat = () => {
       if (!isDailyQuoteSendWindowIst()) return
 
       const { dateKey } = getIstDateParts()
-      const storageKey = `${DAILY_QUOTE_SENT_STORAGE_PREFIX}${sender}:${selectedUser.phone}`
-      if (localStorage.getItem(storageKey) === dateKey) return
+      const storageKey = getDailyQuoteStorageKey(sender, selectedUser.phone, dateKey)
+      if (dailyQuoteInFlightRef.current.has(storageKey)) return
+      if (localStorage.getItem(storageKey) === dateKey && chatHasDailyQuoteForDate(dateKey)) return
 
-      localStorage.setItem(storageKey, dateKey)
-
-      let quoteMessage = createDailyQuoteMessage(dateKey)
+      dailyQuoteInFlightRef.current.add(storageKey)
       try {
-        const response = await getDailyQuote(dateKey, { timeout: 10000 })
-        quoteMessage = createDailyQuoteMessageFromQuote(response.data)
-      } catch (error) {
-        console.error("Failed to load AI quote, using fallback.", error)
-      }
+        if (
+          (localStorage.getItem(storageKey) === dateKey && chatHasDailyQuoteForDate(dateKey)) ||
+          (await serverHasDailyQuoteForDate(dateKey))
+        ) {
+          localStorage.setItem(storageKey, dateKey)
+          return
+        }
 
-      sendOutgoingTo(selectedUser.phone, quoteMessage)
+        const language = getDailyQuoteLanguageForDate(dateKey)
+        let quoteMessage = createDailyQuoteMessage(dateKey)
+        try {
+          const response = await getDailyQuote(dateKey, { timeout: 10000, language })
+          quoteMessage = createDailyQuoteMessageFromQuote(response.data)
+        } catch (error) {
+          console.error("Failed to load AI quote, using fallback.", error)
+        }
+
+        sendOutgoingTo(selectedUser.phone, quoteMessage)
+        localStorage.setItem(storageKey, dateKey)
+      } finally {
+        dailyQuoteInFlightRef.current.delete(storageKey)
+      }
     }
 
     void sendDailyQuoteIfDue()
@@ -2345,7 +2708,14 @@ const Chat = () => {
       void sendDailyQuoteIfDue()
     }, 60 * 1000)
     return () => window.clearInterval(timer)
-  }, [selectedUser, sendOutgoingTo, sender])
+  }, [
+    chatHasDailyQuoteForDate,
+    getDailyQuoteStorageKey,
+    selectedUser,
+    sendOutgoingTo,
+    sender,
+    serverHasDailyQuoteForDate,
+  ])
 
   const isAllowedUploadFile = useCallback((file: File) => {
     const name = file.name.toLowerCase()
@@ -2897,6 +3267,20 @@ const Chat = () => {
           </div>
         </>
       )}
+      {webPreviewToast && (
+        <div className="sl-web-preview-toast" role="status" aria-live="polite">
+          <span aria-hidden="true">{"\u26A0\uFE0F"}</span>
+          <span>{webPreviewToast.message}</span>
+          <button
+            type="button"
+            className="btn btn-sm btn-link p-0 text-reset"
+            onClick={() => setWebPreviewToast(null)}
+            aria-label="Dismiss warning"
+          >
+            {"\u2715"}
+          </button>
+        </div>
+      )}
       {imagePreview && (
         <>
           <div
@@ -3010,6 +3394,87 @@ const Chat = () => {
                   if (imagePreviewZoom === 1) setImagePreviewZoom(2)
                 }}
               />
+            </div>
+          </div>
+        </>
+      )}
+      {webPreview && (
+        <>
+          <div
+            className="position-fixed top-0 start-0 w-100 h-100"
+            style={{ background: "rgba(0,0,0,0.58)", zIndex: 2020 }}
+            role="presentation"
+            onClick={() => setWebPreview(null)}
+          />
+          <div
+            className="position-fixed top-50 start-50 translate-middle bg-body rounded shadow d-flex flex-column sl-web-preview-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Preview ${webPreview.title}`}
+          >
+            <div className="d-flex align-items-center justify-content-between gap-2 p-2 border-bottom">
+              <div style={{ minWidth: 0 }}>
+                <div className="small fw-semibold text-truncate">{webPreview.title}</div>
+                <div className="small text-body-secondary text-truncate">{webPreview.host}</div>
+              </div>
+              <div className="d-flex align-items-center gap-2">
+                <a
+                  href={webPreview.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="btn btn-sm btn-outline-secondary"
+                >
+                  Open
+                </a>
+                <button
+                  type="button"
+                  className="btn btn-sm btn-outline-secondary"
+                  onClick={() => setWebPreview(null)}
+                  aria-label="Close web preview"
+                  title="Close"
+                >
+                  {"\u2715"}
+                </button>
+              </div>
+            </div>
+            <div className="sl-web-preview-url px-2 py-1 border-bottom small text-body-secondary text-truncate">
+              {webPreview.url}
+            </div>
+            <div className="sl-web-preview-frame-wrap">
+              {webPreviewStatus === "failed" ? (
+                <div className="d-flex h-100 flex-column align-items-center justify-content-center gap-2 p-3 text-center">
+                  <div className="fw-semibold">This page cannot be shown inside the app.</div>
+                  <div className="small text-body-secondary">
+                    The website blocked the in-app preview or did not finish loading.
+                  </div>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-primary"
+                    onClick={() => {
+                      const opened = openExternalPage(webPreview.url)
+                      if (!opened) {
+                        setWebPreviewToast({
+                          id: Date.now(),
+                          message: "Popup was blocked. Please allow popups or use the browser address bar.",
+                        })
+                      }
+                    }}
+                  >
+                    Open in new window
+                  </button>
+                </div>
+              ) : (
+                <iframe
+                  key={webPreview.url}
+                  src={webPreview.url}
+                  title={webPreview.title}
+                  className="sl-web-preview-frame"
+                  referrerPolicy="no-referrer-when-downgrade"
+                  sandbox="allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-same-origin allow-scripts"
+                  onLoad={() => setWebPreviewStatus("loaded")}
+                  onError={() => setWebPreviewStatus("failed")}
+                />
+              )}
             </div>
           </div>
         </>
@@ -3897,6 +4362,36 @@ const Chat = () => {
                       {"\u274C"}
                       {"\u2B55"} Game
                     </button>
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-outline-warning"
+                      onClick={() => {
+                        setIsHeaderMenuOpen(false)
+                        setIsAsteroidDodgeOpen(true)
+                      }}
+                    >
+                      {"\u2604\uFE0F"} Asteroid Dodge
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-outline-success"
+                      onClick={() => {
+                        setIsHeaderMenuOpen(false)
+                        setIsMemoryMatchOpen(true)
+                      }}
+                    >
+                      {"\u{1F9E0}"} Memory Match
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-outline-success"
+                      onClick={() => {
+                        setIsHeaderMenuOpen(false)
+                        setIsSudokuOpen(true)
+                      }}
+                    >
+                      {"\u{1F522}"} Sudoku
+                    </button>
                   </div>
                 </div>
               </>
@@ -4591,11 +5086,7 @@ const Chat = () => {
                       )
                     }
 
-                return (
-                  <div style={{ whiteSpace: "pre-wrap" }}>
-                    {renderEmojiText(decoded.value)}
-                  </div>
-                )
+                return renderMessageText(decoded.value, isOutgoing)
               }
 
               const msg = decoded.value
@@ -4683,8 +5174,8 @@ const Chat = () => {
                         </span>
                       )}
                       {msg.text && (
-                        <div style={{ whiteSpace: "pre-wrap" }} className="mt-2">
-                          {renderEmojiText(msg.text)}
+                        <div className="mt-2">
+                          {renderMessageText(msg.text, isOutgoing)}
                         </div>
                       )}
                     </div>
@@ -4750,15 +5241,15 @@ const Chat = () => {
                             </span>
                           )}
                           {msg.text && (
-                            <div style={{ whiteSpace: "pre-wrap" }} className="mt-2">
-                              {renderEmojiText(msg.text)}
+                            <div className="mt-2">
+                              {renderMessageText(msg.text, isOutgoing)}
                             </div>
                           )}
                         </div>
                       )
                     })()
                   ) : (
-                    <div style={{ whiteSpace: "pre-wrap" }}>{renderEmojiText(msg.text ?? "")}</div>
+                    renderMessageText(msg.text ?? "", isOutgoing)
                   )}
                 </div>
               )
@@ -4949,7 +5440,11 @@ const Chat = () => {
               onClick={() => setMessageMenu(null)}
             />
             <div
-              className="bg-body border rounded shadow-sm p-1"
+              className={
+                messageMenu.selectedText
+                  ? "bg-body border rounded shadow-sm p-1 sl-message-context-menu-selected"
+                  : "bg-body border rounded shadow-sm p-1"
+              }
               style={{
                 position: "fixed",
                 top: messageMenu.top,
@@ -4973,143 +5468,177 @@ const Chat = () => {
                     (decoded.value.type === "text" || decoded.value.type === "gif"))
                 const canManage = m.sender === sender
                 const isFileMsg = decoded.kind === "rich" && decoded.value.type === "file"
+                const selectedText = messageMenu.selectedText?.trim() ?? ""
+                const beginReply = (previewText?: string) => {
+                  setEditingMessageId(null)
+                  setEditBase(null)
+                  setEditError(null)
+                  const preview = previewText
+                    ? { type: "text" as const, previewText }
+                    : makeReplyPreview(m.message)
+                  setReplyTo({ id: m._id, sender: m.sender, ...preview })
+                  setMessageMenu(null)
+                  inputRef.current?.focus()
+                }
 
                 return (
                   <>
-                    <div className="d-flex align-items-center gap-1 sl-msg-menu-row">
-                      <button
-                        type="button"
-                        className="btn btn-sm sl-menu-icon-btn"
-                        title="React"
-                        aria-label="React"
-                        onClick={() => {
-                          setReactionPickerMessageId(m._id)
-                          setMessageMenu(null)
-                        }}
-                      >
-                        {"\u263A\uFE0F"}
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-sm sl-menu-icon-btn"
-                        title="Copy message"
-                        aria-label="Copy message"
-                        onClick={async () => {
-                          const text = getCopyTextForMessage(m.message)
-                          try {
-                            await navigator.clipboard.writeText(text)
-                          } catch (e) {
-                            console.error("Copy failed", e)
-                          } finally {
-                            setMessageMenu(null)
-                          }
-                        }}
-                      >
-                        {"\u29C9"}
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-sm sl-menu-icon-btn"
-                        title={isMessageStarred(m) ? "Unstar message" : "Star message"}
-                        aria-label={isMessageStarred(m) ? "Unstar message" : "Star message"}
-                        onClick={() => {
-                          void toggleStarMessage(m)
-                          setMessageMenu(null)
-                        }}
-                      >
-                        {isMessageStarred(m) ? "\u2605" : "\u2606"}
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-sm sl-menu-icon-btn"
-                        title={isMessagePinned(m) ? "Unpin message" : "Pin message"}
-                        aria-label={isMessagePinned(m) ? "Unpin message" : "Pin message"}
-                        onClick={() => {
-                          togglePinMessage(m)
-                          setMessageMenu(null)
-                        }}
-                      >
-                        {isMessagePinned(m) ? "\u{1F4CC}" : "\u{1F4CD}"}
-                      </button>
-
-                      {canManage && canEdit && (
+                    {selectedText ? (
+                      <div className="d-flex align-items-center gap-1 sl-msg-menu-row sl-msg-menu-row-selected">
                         <button
                           type="button"
                           className="btn btn-sm sl-menu-icon-btn"
-                          title="Edit message"
-                          aria-label="Edit message"
+                          title={`Web search "${selectedText}"`}
+                          aria-label="Web search selected text"
                           onClick={() => {
-                            setReplyTo(null)
-                            setSelectedGifUrl(null)
-                            setShowEmojiPicker(false)
-                            setShowGifPicker(false)
-
-                            setEditingMessageId(m._id)
-                            setEditBase(
-                              decoded.kind === "plain"
-                                ? { kind: "plain", value: decoded.value }
-                                : { kind: "rich", value: decoded.value },
-                            )
-                            setInput(
-                              decoded.kind === "plain" ? decoded.value : decoded.value.text ?? "",
-                            )
-                            setEditError(null)
+                            openGoogleSearchPreview(selectedText)
                             setMessageMenu(null)
-                            inputRef.current?.focus()
                           }}
                         >
-                          {"\u270E"}
+                          {"\u{1F50D}"}
                         </button>
-                      )}
+                        <button
+                          type="button"
+                          className="btn btn-sm sl-menu-icon-btn"
+                          title="Reply to selected text"
+                          aria-label="Reply to selected text"
+                          onClick={() => beginReply(selectedText)}
+                        >
+                          {"\u21A9\uFE0E"}
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="sl-msg-menu-grid">
+                        <div className="d-flex align-items-center gap-1 sl-msg-menu-row">
+                          <button
+                            type="button"
+                            className="btn btn-sm sl-menu-icon-btn"
+                            title="React"
+                            aria-label="React"
+                            onClick={() => {
+                              setReactionPickerMessageId(m._id)
+                              setMessageMenu(null)
+                            }}
+                          >
+                            {"\u263A\uFE0F"}
+                          </button>
+                          {canManage && canEdit && (
+                            <button
+                              type="button"
+                              className="btn btn-sm sl-menu-icon-btn"
+                              title="Edit message"
+                              aria-label="Edit message"
+                              onClick={() => {
+                                setReplyTo(null)
+                                setSelectedGifUrl(null)
+                                setShowEmojiPicker(false)
+                                setShowGifPicker(false)
 
-                      <button
-                        type="button"
-                        className="btn btn-sm sl-menu-icon-btn"
-                        title="Reply"
-                        aria-label="Reply"
-                        onClick={() => {
-                          setEditingMessageId(null)
-                          setEditBase(null)
-                          setEditError(null)
-                          setInput("")
-                          const preview = makeReplyPreview(m.message)
-                          setReplyTo({ id: m._id, sender: m.sender, ...preview })
-                          setMessageMenu(null)
-                          inputRef.current?.focus()
-                        }}
-                      >
-                        {"\u21A9\uFE0E"}
-                      </button>
+                                setEditingMessageId(m._id)
+                                setEditBase(
+                                  decoded.kind === "plain"
+                                    ? { kind: "plain", value: decoded.value }
+                                    : { kind: "rich", value: decoded.value },
+                                )
+                                setInput(
+                                  decoded.kind === "plain" ? decoded.value : decoded.value.text ?? "",
+                                )
+                                setEditError(null)
+                                setMessageMenu(null)
+                                inputRef.current?.focus()
+                              }}
+                            >
+                              {"\u270E"}
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            className="btn btn-sm sl-menu-icon-btn"
+                            title="Reply"
+                            aria-label="Reply"
+                            onClick={() => beginReply()}
+                          >
+                            {"\u21A9\uFE0E"}
+                          </button>
+                        </div>
 
-                    {canManage && (
-                      <button
-                        type="button"
-                        className="btn btn-sm sl-menu-icon-btn"
-                        title={isFileMsg ? "Delete file" : "Delete message"}
-                        aria-label="Delete"
-                        onClick={async () => {
-                          try {
-                            await deleteMessage(messageMenu.messageId)
-                            socketService.deleteMessage(messageMenu.messageId)
-                            setMessages((prev) =>
-                              prev.filter((x) => x._id !== messageMenu.messageId),
-                            )
-                            setPinnedMessageIds((prev) =>
-                              prev.filter((id) => id !== messageMenu.messageId),
-                            )
-                            setPinnedMessages((prev) =>
-                              prev.filter((message) => message._id !== messageMenu.messageId),
-                            )
-                            setMessageMenu(null)
-                          } catch (e) {
-                            console.error("Failed to delete message", e)
-                          }
-                        }}
-                      >
-                        {"\u{1F5D1}\uFE0E"}
-                      </button>
+                        <div className="d-flex align-items-center gap-1 sl-msg-menu-row">
+                          <button
+                            type="button"
+                            className="btn btn-sm sl-menu-icon-btn"
+                            title="Copy message"
+                            aria-label="Copy message"
+                            onClick={async () => {
+                              const text = getCopyTextForMessage(m.message)
+                              try {
+                                await navigator.clipboard.writeText(text)
+                              } catch (e) {
+                                console.error("Copy failed", e)
+                              } finally {
+                                setMessageMenu(null)
+                              }
+                            }}
+                          >
+                            {"\u29C9"}
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-sm sl-menu-icon-btn"
+                            title={isMessageStarred(m) ? "Unstar message" : "Star message"}
+                            aria-label={isMessageStarred(m) ? "Unstar message" : "Star message"}
+                            onClick={() => {
+                              void toggleStarMessage(m)
+                              setMessageMenu(null)
+                            }}
+                          >
+                            {isMessageStarred(m) ? "\u2605" : "\u2606"}
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-sm sl-menu-icon-btn"
+                            title={isMessagePinned(m) ? "Unpin message" : "Pin message"}
+                            aria-label={isMessagePinned(m) ? "Unpin message" : "Pin message"}
+                            onClick={() => {
+                              togglePinMessage(m)
+                              setMessageMenu(null)
+                            }}
+                          >
+                            {isMessagePinned(m) ? "\u{1F4CC}" : "\u{1F4CD}"}
+                          </button>
+                        </div>
+
+                        {canManage && (
+                          <div className="d-flex align-items-center gap-1 sl-msg-menu-row">
+                            <button
+                              type="button"
+                              className="btn btn-sm sl-menu-icon-btn"
+                              title={isFileMsg ? "Delete file" : "Delete message"}
+                              aria-label="Delete"
+                              onClick={async () => {
+                                try {
+                                  await deleteMessage(messageMenu.messageId)
+                                  socketService.deleteMessage(messageMenu.messageId)
+                                  setMessages((prev) =>
+                                    prev.filter((x) => x._id !== messageMenu.messageId),
+                                  )
+                                  setPinnedMessageIds((prev) =>
+                                    prev.filter((id) => id !== messageMenu.messageId),
+                                  )
+                                  setPinnedMessages((prev) =>
+                                    prev.filter((message) => message._id !== messageMenu.messageId),
+                                  )
+                                  setMessageMenu(null)
+                                } catch (e) {
+                                  console.error("Failed to delete message", e)
+                                }
+                              }}
+                            >
+                              {"\u{1F5D1}\uFE0E"}
+                            </button>
+                          </div>
+                        )}
+                      </div>
                     )}
-                    </div>
                   </>
                 )
               })()}
@@ -5505,6 +6034,9 @@ const Chat = () => {
             )}
           </div>
         )}
+        {isAsteroidDodgeOpen && <AsteroidDodge onClose={() => setIsAsteroidDodgeOpen(false)} />}
+        {isMemoryMatchOpen && <MemoryMatch onClose={() => setIsMemoryMatchOpen(false)} />}
+        {isSudokuOpen && <Sudoku onClose={() => setIsSudokuOpen(false)} />}
       </div>
     </div>
   )
