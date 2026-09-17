@@ -66,10 +66,10 @@ const AsteroidDodge = ({ onClose }: Props) => {
 
       let nextAsteroids = asteroidsRef.current.map((asteroid) => ({
         ...asteroid,
-        y: asteroid.y + delta * 0.045,
+        y: asteroid.y + delta * 0.038,
       }))
 
-      if (now - lastSpawn > 720) {
+      if (now - lastSpawn > 850) {
         nextAsteroids = [
           ...nextAsteroids,
           {
@@ -83,7 +83,7 @@ const AsteroidDodge = ({ onClose }: Props) => {
       }
 
       const collision = nextAsteroids.some(
-        (asteroid) => asteroid.lane === playerLaneRef.current && asteroid.y > PLAYER_Y - 7 && asteroid.y < PLAYER_Y + 8,
+        (asteroid) => asteroid.lane === playerLaneRef.current && asteroid.y > PLAYER_Y - 4 && asteroid.y < PLAYER_Y + 5,
       )
       const passed = nextAsteroids.filter((asteroid) => asteroid.y > 105).length
       nextAsteroids = nextAsteroids.filter((asteroid) => asteroid.y <= 105)
